@@ -91,3 +91,44 @@ async def cmd_test_markdownv2(message: Message):
 
     await send_md_v2(message, test_text)
 
+
+@router.message(Command("test_raw"))
+async def cmd_test_raw(message: Message):
+    """Тестовая команда для проверки сырого текста с MarkdownV2."""
+    # Текст передается как есть, без обработки
+    test_text = """*📝 Тест MarkdownV2 формата*
+
+
+
+_Курсив_
+
+
+
+*Жирный*
+
+
+
+__Подчёркнутый__
+
+
+
+~Зачёркнутый~
+
+
+
+*__Комбо стиль: жирный \+ подчёркнутый__* 
+
+
+
+*Жирный _курсив_ ~зачеркнутый~ __и подчёркнутый курсив__*
+
+
+
+||Скрытый текст \(спойлер\)||
+
+
+
+`inline code: a \+ b \= c`"""
+
+    await send_md_v2(message, test_text)
+

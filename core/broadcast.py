@@ -7,7 +7,7 @@ from loguru import logger
 
 from core.config import Config
 from core.database import db
-from core.markdown_v2 import send_md_v2, sanitize_markdown_v2, smart_escape_markdown_v2
+from core.markdown_v2 import send_md_v2, sanitize_markdown_v2
 from core.message_splitter import send_long_markdown
 from features.admin.states import ADMIN_States
 
@@ -60,15 +60,12 @@ async def process_broadcast_text(message: Message, state: FSMContext):
     await state.set_state(ADMIN_States.BROADCAST_CONFIRM)
     
     # Показываем предпросмотр с использованием MarkdownV2
-    # Служебный текст экранируем, текст админа тоже экранируем для безопасности предпросмотра
+    # Служебный текст экранируем, текст админа передаем как есть
     preview_header = sanitize_markdown_v2("📋 Предпросмотр сообщения:")
     preview_footer = sanitize_markdown_v2("Подтвердите отправку:")
     
-    # Используем умное экранирование для предпросмотра: сохраняем Markdown-теги,
-    # но экранируем незаэкранированные спецсимволы для безопасности
-    # В финальной рассылке текст будет отправлен через smart_escape_markdown_v2
+    # Текст админа передаем как есть (без экранирования) - он уже содержит Markdown-теги
     user_text_preview = text[:500] + ('...' if len(text) > 500 else '')
-    user_text_preview = smart_escape_markdown_v2(user_text_preview)
     
     # Формируем полный текст предпросмотра
     preview_text = f"{preview_header}\n\n{user_text_preview}\n\n{preview_footer}"

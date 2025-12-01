@@ -1,8 +1,9 @@
 """Message splitting for Telegram length limits."""
 from typing import List
 from loguru import logger
+from aiogram.enums import ParseMode
 
-from core.markdown_v2 import sanitize_markdown_v2, smart_escape_markdown_v2
+from core.markdown_v2 import sanitize_markdown_v2
 
 # Лимит Telegram для одного сообщения
 TELEGRAM_MESSAGE_LIMIT = 4096
@@ -101,18 +102,15 @@ async def send_long_markdown(bot, chat_id: int, text: str, sanitize: bool = Fals
         text = sanitize_markdown_v2(text)
         logger.debug(f"[SEND_LONG_MD] Текст после санитизации (первые 200 символов): {text[:200]}")
     else:
-        # Используем умное экранирование для исправления незаэкранированных спецсимволов
-        # вне Markdown-тегов, сохраняя существующую разметку
-        logger.debug(f"[SEND_LONG_MD] Применяю умное экранирование для исправления незаэкранированных символов...")
-        text = smart_escape_markdown_v2(text)
-        logger.debug(f"[SEND_LONG_MD] Текст после умного экранирования (первые 200 символов): {text[:200]}")
+        # Текст передаем как есть (без экранирования) - он уже содержит Markdown-теги
+        logger.debug(f"[SEND_LONG_MD] Текст передается как есть (без экранирования)")
     
     # Разбиваем на чанки
     chunks = split_markdown_message(text)
     logger.debug(f"[SEND_LONG_MD] Текст разбит на {len(chunks)} чанков")
     
     # Отправляем по очереди
-    parse_mode = kwargs.pop('parse_mode', 'MarkdownV2')
+    parse_mode = kwargs.pop('parse_mode', ParseMode.MARKDOWN_V2)
     logger.debug(f"[SEND_LONG_MD] Используется parse_mode: {parse_mode}")
     
     for i, chunk in enumerate(chunks):

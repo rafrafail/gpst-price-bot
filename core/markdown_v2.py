@@ -30,74 +30,92 @@ def sanitize_markdown_v2(text: str) -> str:
     return _MD_V2_ESCAPE_RE.sub(r"\\\1", text)
 
 
-def smart_escape_markdown_v2(text: str) -> str:
+def sanitize_ai_text(text: str) -> str:
     """
-    Умное экранирование MarkdownV2: экранирует спецсимволы только вне Markdown-тегов.
+    Санитизирует текст от ИИ для MarkdownV2.
     
-    Эта функция пытается сохранить существующую Markdown-разметку, экранируя только
-    незаэкранированные спецсимволы, которые находятся вне тегов форматирования.
-    
-    Обрабатывает:
-    - Inline code: `...`
-    - Code blocks: ```...```
-    - Форматирование: *...*, _..._, __...__, ~...~, ||...||
-    - Ссылки: [...](...)
+    Функция:
+    1. Удаляет неподдерживаемые элементы (заголовки #, таблицы, HTML и т.д.)
+    2. Экранирует незаэкранированные спецсимволы (=, +, - и т.д.) вне поддерживаемых тегов
+    3. Сохраняет поддерживаемые теги MarkdownV2:
+       - *text* (жирный)
+       - _text_ (курсив)
+       - __text__ (подчеркнутый)
+       - ~text~ (зачеркнутый)
+       - ||text|| (спойлер)
+       - `code` (inline code)
+       - ```code``` (code block)
+       - [text](url) (ссылки)
     
     Args:
-        text: Текст с возможной Markdown-разметкой
+        text: Текст от ИИ с возможными ошибками форматирования
         
     Returns:
-        Текст с экранированными спецсимволами вне тегов
+        Санитизированный текст, готовый для отправки с parse_mode="MarkdownV2"
     """
     if not text:
         return ""
     
-    # Регулярки для поиска Markdown-тегов
-    # Inline code: `...` (не `\`...`)
-    inline_code_pattern = r'(?<!\\)`[^`]*`'
-    # Code blocks: ```...``` (многострочные)
+    # 1. Удаляем HTML теги
+    text = re.sub(r'<[^>]+>', '', text)
+    
+    # 2. Удаляем заголовки Markdown (не поддерживаются в MarkdownV2)
+    # Заголовки: # Заголовок, ## Заголовок и т.д.
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    
+    # 3. Удаляем таблицы (не поддерживаются в MarkdownV2)
+    # Таблицы: | столбец | столбец |
+    lines = text.split('\n')
+    result_lines = []
+    
+    for line in lines:
+        # Пропускаем строки таблиц (содержат | и выравнивание)
+        if '|' in line and re.match(r'^\s*\|.*\|\s*$', line):
+            # Проверяем, не является ли это спойлером (||text||)
+            if not re.match(r'^\s*\|\|[^|]+\|\|\s*$', line):
+                continue  # Пропускаем строку таблицы
+        result_lines.append(line)
+    
+    text = '\n'.join(result_lines)
+    
+    # 4. Экранируем незаэкранированные спецсимволы вне поддерживаемых тегов
+    # Поддерживаемые теги MarkdownV2
     code_block_pattern = r'```[\s\S]*?```'
-    # Форматирование: *...*, _..._, __...__, ~...~, ||...||
+    inline_code_pattern = r'(?<!\\)`[^`]*`'
+    link_pattern = r'\[[^\]]*\]\([^\)]*\)'
+    underline_pattern = r'__[^_]*__'
     bold_pattern = r'(?<!\\)\*[^*]*\*'
     italic_pattern = r'(?<!\\)_[^_]*_'
-    underline_pattern = r'__[^_]*__'
     strike_pattern = r'(?<!\\)~[^~]*~'
     spoiler_pattern = r'\|\|[^|]*\|\|'
-    # Ссылки: [...](...)
-    link_pattern = r'\[[^\]]*\]\([^\)]*\)'
     
-    # Собираем все паттерны
-    # ВАЖНО: Порядок имеет значение! Более специфичные паттерны должны идти первыми
     all_patterns = [
-        code_block_pattern,  # Сначала code blocks (они могут содержать другие теги)
+        code_block_pattern,
         inline_code_pattern,
         link_pattern,
-        underline_pattern,  # Подчеркивание перед жирным (чтобы __ не конфликтовало с _)
+        underline_pattern,
         bold_pattern,
         italic_pattern,
         strike_pattern,
         spoiler_pattern,
     ]
     
-    # Находим все теги и их позиции
+    # Находим все поддерживаемые теги
     protected_ranges = []
     for pattern in all_patterns:
         for match in re.finditer(pattern, text):
             protected_ranges.append((match.start(), match.end()))
     
-    # Сортируем по позиции начала
+    # Сортируем и объединяем перекрывающиеся диапазоны
     protected_ranges.sort()
-    
-    # Объединяем перекрывающиеся диапазоны
     merged_ranges = []
     for start, end in protected_ranges:
         if merged_ranges and start <= merged_ranges[-1][1]:
-            # Перекрывается с предыдущим
             merged_ranges[-1] = (merged_ranges[-1][0], max(merged_ranges[-1][1], end))
         else:
             merged_ranges.append((start, end))
     
-    # Экранируем спецсимволы вне защищенных диапазонов и внутри тегов
+    # Экранируем спецсимволы только вне поддерживаемых тегов
     result = []
     last_pos = 0
     
@@ -105,15 +123,11 @@ def smart_escape_markdown_v2(text: str) -> str:
         # Экранируем часть до тега
         if start > last_pos:
             part = text[last_pos:start]
-            # Экранируем только незаэкранированные спецсимволы
             escaped_part = _escape_unprotected_chars(part)
             result.append(escaped_part)
         
-        # Обрабатываем сам тег: экранируем содержимое внутри тега
-        tag_content = text[start:end]
-        # Определяем тип тега и экранируем содержимое
-        escaped_tag = _escape_content_in_tag(tag_content)
-        result.append(escaped_tag)
+        # Добавляем тег как есть (он уже правильный)
+        result.append(text[start:end])
         last_pos = end
     
     # Экранируем оставшуюся часть
@@ -158,120 +172,6 @@ def _escape_unprotected_chars(text: str) -> str:
         i += 1
     
     return ''.join(result)
-
-
-def _escape_content_in_tag(tag: str) -> str:
-    """
-    Экранирует спецсимволы внутри Markdown-тега, сохраняя структуру тега.
-    
-    ВАЖНО: Не экранирует символы, которые могут быть частью вложенных тегов:
-    - `_`, `*`, `|`, `` ` `` - могут быть частью вложенных тегов
-    - Экранирует только: `=`, `+`, `-`, `.`, `!`, `{`, `}`, `>`, `#` и т.д.
-    
-    Например:
-    - `*текст с =*` -> `*текст с \=*`
-    - `__текст с +__` -> `__текст с \+__`
-    - `*__вложенный__*` -> остается `*__вложенный__*` (не экранирует `_`)
-    """
-    if not tag:
-        return tag
-    
-    # Спецсимволы, которые нужно экранировать внутри тегов (не те, что могут быть частью вложенных тегов)
-    # Исключаем: _ * | ` (могут быть частью вложенных тегов)
-    safe_chars_to_escape = set('=+-.!#{}>[]()~')
-    
-    def escape_safe_chars(text: str) -> str:
-        """Экранирует только безопасные спецсимволы, не трогая символы тегов."""
-        result = []
-        i = 0
-        while i < len(text):
-            char = text[i]
-            
-            # Если это обратный слэш, пропускаем следующий символ
-            if char == '\\' and i + 1 < len(text):
-                result.append(char)
-                result.append(text[i + 1])
-                i += 2
-                continue
-            
-            # Экранируем только безопасные спецсимволы
-            if char in safe_chars_to_escape:
-                result.append('\\')
-                result.append(char)
-            else:
-                result.append(char)
-            
-            i += 1
-        
-        return ''.join(result)
-    
-    # Определяем тип тега и извлекаем содержимое
-    # Inline code: `...`
-    if tag.startswith('`') and tag.endswith('`'):
-        if tag.startswith('```'):
-            # Code block: ```...```
-            if len(tag) > 6:
-                # Извлекаем язык (если есть) и содержимое
-                parts = tag[3:].rsplit('```', 1)
-                if len(parts) == 2:
-                    content = parts[0]
-                    # Ищем перенос строки после языка
-                    if '\n' in content:
-                        lang_part, code_content = content.split('\n', 1)
-                        escaped_content = escape_safe_chars(code_content)
-                        return f"```{lang_part}\n{escaped_content}\n```"
-                    else:
-                        escaped_content = escape_safe_chars(content)
-                        return f"```{escaped_content}\n```"
-            return tag
-        else:
-            # Inline code: `...`
-            content = tag[1:-1]
-            escaped_content = escape_safe_chars(content)
-            return f"`{escaped_content}`"
-    
-    # Подчеркивание: __...__
-    if tag.startswith('__') and tag.endswith('__'):
-        content = tag[2:-2]
-        escaped_content = escape_safe_chars(content)
-        return f"__{escaped_content}__"
-    
-    # Курсив: _..._
-    if tag.startswith('_') and tag.endswith('_') and not tag.startswith('__'):
-        content = tag[1:-1]
-        escaped_content = escape_safe_chars(content)
-        return f"_{escaped_content}_"
-    
-    # Жирный: *...*
-    if tag.startswith('*') and tag.endswith('*'):
-        content = tag[1:-1]
-        escaped_content = escape_safe_chars(content)
-        return f"*{escaped_content}*"
-    
-    # Зачеркнутый: ~...~
-    if tag.startswith('~') and tag.endswith('~'):
-        content = tag[1:-1]
-        escaped_content = escape_safe_chars(content)
-        return f"~{escaped_content}~"
-    
-    # Спойлер: ||...||
-    if tag.startswith('||') and tag.endswith('||'):
-        content = tag[2:-2]
-        escaped_content = escape_safe_chars(content)
-        return f"||{escaped_content}||"
-    
-    # Ссылка: [...](...)
-    if tag.startswith('[') and '](' in tag and tag.endswith(')'):
-        match = re.match(r'^\[([^\]]*)\]\(([^\)]*)\)$', tag)
-        if match:
-            link_text = match.group(1)
-            link_url = match.group(2)
-            escaped_text = escape_safe_chars(link_text)
-            escaped_url = escape_safe_chars(link_url)
-            return f"[{escaped_text}]({escaped_url})"
-    
-    # Если тег не распознан, возвращаем как есть (не экранируем, чтобы не сломать)
-    return tag
 
 
 # ----- Хелперы для форматирования ----- #

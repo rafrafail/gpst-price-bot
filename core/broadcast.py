@@ -1,8 +1,10 @@
 """Broadcast module for sending messages to all users."""
+import re
 from aiogram import Bot, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramBadRequest
 from loguru import logger
 
 from core.config import Config
@@ -17,6 +19,92 @@ router = Router()
 def is_admin(user_id: int) -> bool:
     """Check if user is admin."""
     return Config.is_admin(user_id)
+
+
+def _parse_markdown_error(error_message: str, text: str) -> dict:
+    """
+    Парсит ошибку от Telegram API и находит проблемное место в тексте.
+    
+    Args:
+        error_message: Сообщение об ошибке от Telegram
+        text: Текст, в котором ищем ошибку
+        
+    Returns:
+        Словарь с информацией об ошибке:
+        - description: Описание ошибки
+        - position: Позиция проблемного символа (или None)
+        - context: Контекст вокруг ошибки
+        - suggestion: Совет по исправлению
+    """
+    result = {
+        'description': error_message,
+        'position': None,
+        'context': '',
+        'suggestion': 'Проверьте правильность экранирования спецсимволов.'
+    }
+    
+    # Ищем информацию о проблемном символе
+    # Пример: "Character '=' is reserved and must be escaped with the preceding '\'"
+    char_match = re.search(r"Character '([^']+)'", error_message)
+    if char_match:
+        problem_char = char_match.group(1)
+        result['description'] = f"Символ '{problem_char}' не экранирован"
+        result['suggestion'] = f"Добавьте обратный слэш перед '{problem_char}': \\{problem_char}"
+        
+        # Ищем незаэкранированный символ в тексте
+        # Ищем символ, который не идет после обратного слэша
+        pattern = rf'(?<!\\){re.escape(problem_char)}'
+        matches = list(re.finditer(pattern, text))
+        
+        if matches:
+            # Берем первое вхождение
+            match = matches[0]
+            pos = match.start()
+            result['position'] = pos
+            
+            # Формируем контекст (3 строки до и после, или 100 символов)
+            lines = text.split('\n')
+            line_num = 0
+            char_count = 0
+            
+            # Находим номер строки с ошибкой
+            for i, line in enumerate(lines):
+                if char_count + len(line) >= pos:
+                    line_num = i
+                    break
+                char_count += len(line) + 1  # +1 для \n
+            
+            # Берем 2 строки до и после
+            start_line = max(0, line_num - 2)
+            end_line = min(len(lines), line_num + 3)
+            context_lines = lines[start_line:end_line]
+            
+            # Находим позицию в строке
+            line_start_pos = char_count - len(lines[line_num]) if line_num > 0 else 0
+            pos_in_line = pos - line_start_pos
+            
+            # Формируем контекст с указателем
+            context_parts = []
+            for i, line in enumerate(context_lines):
+                actual_line_num = start_line + i
+                if actual_line_num == line_num:
+                    # Показываем строку с ошибкой и указателем
+                    context_parts.append(f"{actual_line_num + 1:3d} | {line}")
+                    # Указатель на проблемный символ
+                    marker_pos = min(pos_in_line, len(line))
+                    marker_line = " " * (5 + marker_pos) + "👉"
+                    context_parts.append(f"{marker_line} Здесь символ '{problem_char}' не экранирован")
+                else:
+                    context_parts.append(f"{actual_line_num + 1:3d} | {line}")
+            
+            result['context'] = '\n'.join(context_parts)
+    else:
+        # Если не нашли конкретный символ, проверяем общие ошибки парсинга
+        if "can't parse entities" in error_message.lower():
+            result['description'] = "Ошибка парсинга Markdown-разметки"
+            result['suggestion'] = "Проверьте правильность закрытия всех тегов (*, _, __, ~, ||, `)"
+    
+    return result
 
 
 @router.message(Command("broadcast"))
@@ -85,12 +173,38 @@ async def process_broadcast_text(message: Message, state: FSMContext):
             reply_markup=keyboard
         )
         logger.info(f"[BROADCAST] Предпросмотр успешно отправлен")
+    except TelegramBadRequest as e:
+        # Обрабатываем ошибки парсинга MarkdownV2
+        error_message = str(e)
+        logger.warning(f"[BROADCAST] Ошибка парсинга MarkdownV2: {error_message}")
+        
+        # Пытаемся извлечь информацию об ошибке
+        error_info = _parse_markdown_error(error_message, user_text_preview)
+        
+        # Формируем сообщение об ошибке для админа
+        error_text = "❌ Ошибка в Markdown-форматировании!\n\n"
+        error_text += f"📝 {error_info['description']}\n\n"
+        
+        if error_info['position'] is not None:
+            error_text += f"📍 Проблема найдена в тексте:\n"
+            error_text += f"```\n{error_info['context']}\n```\n\n"
+            error_text += f"💡 Совет: {error_info['suggestion']}"
+        else:
+            error_text += f"💡 Совет: {error_info['suggestion']}"
+        
+        await message.answer(
+            error_text,
+            reply_markup=keyboard,
+            parse_mode=None
+        )
     except Exception as e:
-        logger.warning(f"[BROADCAST] Ошибка при отправке предпросмотра с Markdown: {e}")
+        logger.warning(f"[BROADCAST] Неожиданная ошибка при отправке предпросмотра: {e}")
         logger.exception(f"[BROADCAST] Детали ошибки:")
         # Отправляем без Markdown, если парсинг не удался
         await message.answer(
-            f"📋 Предпросмотр сообщения:\n\n{user_text_preview}\n\nПодтвердите отправку:",
+            f"❌ Ошибка при обработке сообщения.\n\n"
+            f"📋 Предпросмотр (без форматирования):\n\n{user_text_preview}\n\n"
+            f"Подтвердите отправку:",
             reply_markup=keyboard,
             parse_mode=None
         )

@@ -1,0 +1,41 @@
+{
+  "default": {
+    "model": "openai/gpt-4o-mini",
+    "temperature": 0.4,
+    "max_tokens": 2048,
+    "top_p": 0.9
+  },
+  "agents": {
+    "planner": {
+      "model": "openai/gpt-4o-mini",
+      "temperature": 0.2,
+      "max_tokens": 1500
+    },
+    "worker": {
+      "model": "openai/gpt-4o",
+      "temperature": 0.5,
+      "max_tokens": 3000
+    },
+    "critic": {
+      "model": "openai/gpt-4o-mini",
+      "temperature": 0.1,
+      "max_tokens": 1000
+    },
+    "finalizer": {
+      "model": "openai/gpt-4o-mini",
+      "temperature": 0.3,
+      "max_tokens": 2000
+    }
+  },
+  "model_costs": {
+    "openai/gpt-4o-mini": {
+      "input_per_1k": 0.00015,
+      "output_per_1k": 0.0006
+    },
+    "openai/gpt-4o": {
+      "input_per_1k": 0.0025,
+      "output_per_1k": 0.01
+    }
+  }
+}
+

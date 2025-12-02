@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Main entry point for Telegram Bot."""
 import asyncio
 import sys
@@ -16,7 +17,7 @@ from loguru import logger
 from core.config import Config, CriticalError
 from core.logger import setup_logger
 from core.database import db
-from core.broadcast import router as broadcast_router
+from features.admin.broadcast import router as broadcast_router
 from core.test_markdownv2 import router as test_markdownv2_router
 from features.admin.handlers import router as admin_router
 

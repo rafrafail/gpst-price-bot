@@ -79,6 +79,18 @@ class Database:
                 rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
     
+    async def get_all_users_with_info(self) -> list[dict]:
+        """Get all registered users with full information."""
+        await self.init()
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT telegram_id, telegram_nickname, telegram_name FROM users"
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+    
     async def get_all_user_ids(self) -> list[int]:
         """Get all user telegram IDs (for broadcast)."""
         users = await self.get_all_users()

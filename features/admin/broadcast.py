@@ -411,7 +411,7 @@ async def create_broadcast_text_file(
     return csv_path
 
 
-async def safe_edit_or_send(callback: CallbackQuery, text: str, parse_mode: Optional[str] = None) -> None:
+async def safe_edit_or_send(callback: CallbackQuery, text: str, parse_mode: Optional[str] = None, reply_markup: Optional[InlineKeyboardMarkup] = None) -> None:
     """
     Безопасно редактирует сообщение или отправляет новое, если редактирование невозможно.
     
@@ -419,6 +419,7 @@ async def safe_edit_or_send(callback: CallbackQuery, text: str, parse_mode: Opti
         callback: CallbackQuery объект
         text: Текст для отправки
         parse_mode: Режим парсинга (опционально)
+        reply_markup: Клавиатура (опционально)
     """
     try:
         # Пытаемся отредактировать сообщение
@@ -426,7 +427,7 @@ async def safe_edit_or_send(callback: CallbackQuery, text: str, parse_mode: Opti
             # Если это фото, пытаемся отредактировать caption
             # Но если caption нет или это медиагруппа, это может не сработать
             try:
-                await callback.message.edit_caption(caption=text, parse_mode=parse_mode)
+                await callback.message.edit_caption(caption=text, parse_mode=parse_mode, reply_markup=reply_markup)
                 return
             except Exception:
                 # Если не удалось отредактировать caption, отправляем новое сообщение
@@ -434,7 +435,7 @@ async def safe_edit_or_send(callback: CallbackQuery, text: str, parse_mode: Opti
         else:
             # Если это текстовое сообщение, редактируем текст
             try:
-                await callback.message.edit_text(text=text, parse_mode=parse_mode)
+                await callback.message.edit_text(text=text, parse_mode=parse_mode, reply_markup=reply_markup)
                 return
             except Exception:
                 # Если не удалось отредактировать, отправляем новое сообщение
@@ -443,7 +444,7 @@ async def safe_edit_or_send(callback: CallbackQuery, text: str, parse_mode: Opti
         logger.debug(f"[BROADCAST] Не удалось отредактировать сообщение: {e}, отправляю новое")
     
     # Если редактирование не удалось, отправляем новое сообщение
-    await callback.message.answer(text, parse_mode=parse_mode)
+    await callback.message.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
 
 
 def _create_preview_keyboard(has_photos: bool = False, has_buttons: bool = False, has_error: bool = False) -> InlineKeyboardMarkup:
@@ -710,10 +711,31 @@ async def cmd_broadcast(message: Message, state: FSMContext):
         return
     
     await state.set_state(ADMIN_States.BROADCAST_TEXT)
+    
+    # Создаем клавиатуру с кнопкой "Отмена"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast_cancel")
+        ]
+    ])
+    
     await message.answer(
-        "📢 Введите текст сообщения для рассылки (поддерживается Markdown):\n\n"
-        "Используйте /cancel для отмены."
+        "📢 Введите текст сообщения для рассылки (поддерживается Markdown):",
+        reply_markup=keyboard
     )
+
+
+@router.message(lambda m: m.text and m.text.startswith("/") and not m.text.startswith("/broadcast"), ADMIN_States.BROADCAST_TEXT)
+async def cancel_broadcast_on_command(message: Message, state: FSMContext):
+    """Cancel broadcast if user calls another command during text input."""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет прав для выполнения этой команды.")
+        await state.clear()
+        return
+    
+    # Очищаем состояние broadcast
+    await state.clear()
+    await message.answer("❌ Создание рассылки отменено из-за вызова другой команды.")
 
 
 @router.message(ADMIN_States.BROADCAST_TEXT)
@@ -731,7 +753,7 @@ async def process_broadcast_text(message: Message, state: FSMContext):
     logger.debug(f"[BROADCAST] Длина текста: {len(text)} символов")
     
     if not text.strip():
-        await message.answer("❌ Текст не может быть пустым. Попробуйте снова или /cancel")
+        await message.answer("❌ Текст не может быть пустым. Попробуйте снова.")
         return
     
     # Сохраняем текст в состоянии
@@ -760,10 +782,18 @@ async def add_photo_callback(callback: CallbackQuery, state: FSMContext):
         return
     
     await state.set_state(ADMIN_States.BROADCAST_ADD_PHOTO)
+    
+    # Создаем клавиатуру с кнопкой "Назад"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="⬅️ Назад", callback_data="broadcast_back_to_preview")
+        ]
+    ])
+    
     await safe_edit_or_send(
         callback,
-        "📷 Отправьте фотографию, видео или несколько медиафайлов (можно отправить медиагруппой).\n\n"
-        "Используйте /cancel для отмены."
+        "📷 Отправьте фотографию, видео или несколько медиафайлов (можно отправить медиагруппой).",
+        reply_markup=keyboard
     )
     await callback.answer()
 
@@ -797,7 +827,7 @@ async def process_add_photo(message: Message, state: FSMContext):
         media_id = message.video.file_id
         media_type = "video"
     else:
-        await message.answer("❌ Пожалуйста, отправьте фотографию или видео. Используйте /cancel для отмены.")
+        await message.answer("❌ Пожалуйста, отправьте фотографию или видео.")
         return
     
     # Проверяем, это медиагруппа или одиночный файл
@@ -910,10 +940,18 @@ async def add_button_callback(callback: CallbackQuery, state: FSMContext):
         return
     
     await state.set_state(ADMIN_States.BROADCAST_ADD_BUTTON_TEXT)
+    
+    # Создаем клавиатуру с кнопкой "Назад"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="⬅️ Назад", callback_data="broadcast_back_to_preview")
+        ]
+    ])
+    
     await safe_edit_or_send(
         callback,
-        "🔘 Введите текст для кнопки:\n\n"
-        "Используйте /cancel для отмены."
+        "🔘 Введите текст для кнопки:",
+        reply_markup=keyboard
     )
     await callback.answer()
 
@@ -929,14 +967,22 @@ async def process_button_text(message: Message, state: FSMContext):
     button_text = message.text or ""
     
     if not button_text.strip():
-        await message.answer("❌ Текст кнопки не может быть пустым. Попробуйте снова или /cancel")
+        await message.answer("❌ Текст кнопки не может быть пустым. Попробуйте снова.")
         return
     
     await state.update_data(button_text=button_text)
     await state.set_state(ADMIN_States.BROADCAST_ADD_BUTTON_URL)
+    
+    # Создаем клавиатуру с кнопкой "Назад"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="⬅️ Назад", callback_data="broadcast_back_to_preview")
+        ]
+    ])
+    
     await message.answer(
-        "🔗 Введите URL для кнопки:\n\n"
-        "Используйте /cancel для отмены."
+        "🔗 Введите URL для кнопки:",
+        reply_markup=keyboard
     )
 
 
@@ -957,12 +1003,12 @@ async def process_button_url(message: Message, state: FSMContext):
     existing_buttons = data.get("broadcast_buttons") or []
     
     if not button_url.strip():
-        await message.answer("❌ URL кнопки не может быть пустым. Попробуйте снова или /cancel")
+        await message.answer("❌ URL кнопки не может быть пустым. Попробуйте снова.")
         return
     
     # Проверяем, что это валидный URL
     if not (button_url.startswith("http://") or button_url.startswith("https://")):
-        await message.answer("❌ URL должен начинаться с http:// или https://. Попробуйте снова или /cancel")
+        await message.answer("❌ URL должен начинаться с http:// или https://. Попробуйте снова.")
         return
     
     # Добавляем кнопку
@@ -990,10 +1036,18 @@ async def fix_text_callback(callback: CallbackQuery, state: FSMContext):
         return
     
     await state.set_state(ADMIN_States.BROADCAST_TEXT)
+    
+    # Создаем клавиатуру с кнопкой "Отмена"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast_cancel")
+        ]
+    ])
+    
     await safe_edit_or_send(
         callback,
-        "📝 Введите исправленный текст сообщения для рассылки (поддерживается Markdown):\n\n"
-        "Используйте /cancel для отмены."
+        "📝 Введите исправленный текст сообщения для рассылки (поддерживается Markdown):",
+        reply_markup=keyboard
     )
     await callback.answer()
 
@@ -1211,6 +1265,71 @@ async def confirm_broadcast(callback: CallbackQuery, state: FSMContext, bot: Bot
     await callback.answer()
 
 
+@router.callback_query(lambda c: c.data == "broadcast_back_to_preview")
+async def back_to_preview(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    """Return to preview from button input or photo selection."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет прав для выполнения этой команды.", show_alert=True)
+        return
+    
+    # Сохраняем ссылку на сообщение и chat перед удалением
+    message_to_delete = callback.message
+    chat = callback.message.chat
+    
+    # Удаляем старое сообщение, если возможно
+    try:
+        if message_to_delete:
+            await message_to_delete.delete()
+    except Exception as e:
+        logger.debug(f"[BROADCAST] Не удалось удалить сообщение: {e}")
+    
+    # Получаем данные из состояния
+    data = await state.get_data()
+    text = data.get("broadcast_text", "")
+    photos = data.get("broadcast_photos")
+    videos = data.get("broadcast_videos")
+    buttons = data.get("broadcast_buttons") or []
+    
+    # Возвращаемся в состояние превью
+    await state.set_state(ADMIN_States.BROADCAST_PREVIEW)
+    
+    # Создаем временный объект Message для _show_preview
+    # Используем методы bot напрямую через обёртку
+    from aiogram.types import Message as MessageType
+    
+    class MessageWrapper:
+        """Обёртка для Message, которая использует bot для отправки."""
+        def __init__(self, chat, from_user, bot):
+            self.chat = chat
+            self.from_user = from_user
+            self._bot = bot
+        
+        async def answer(self, text, **kwargs):
+            return await self._bot.send_message(self.chat.id, text, **kwargs)
+        
+        async def answer_photo(self, photo, **kwargs):
+            return await self._bot.send_photo(self.chat.id, photo, **kwargs)
+        
+        async def answer_video(self, video, **kwargs):
+            return await self._bot.send_video(self.chat.id, video, **kwargs)
+        
+        async def answer_media_group(self, media, **kwargs):
+            return await self._bot.send_media_group(self.chat.id, media, **kwargs)
+    
+    temp_message = MessageWrapper(chat, callback.from_user, bot)
+    
+    # Показываем превью
+    await _show_preview(
+        message=temp_message,
+        text=text,
+        photos=photos,
+        videos=videos,
+        buttons=buttons,
+        has_error=False
+    )
+    await callback.answer()
+
+
 @router.callback_query(lambda c: c.data == "broadcast_cancel")
 async def cancel_broadcast(callback: CallbackQuery, state: FSMContext):
     """Cancel broadcast."""
@@ -1223,20 +1342,4 @@ async def cancel_broadcast(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.message(Command("cancel"))
-async def cmd_cancel(message: Message, state: FSMContext):
-    """Cancel current FSM state."""
-    current_state = await state.get_state()
-    if current_state is None:
-        await message.answer("Нет активного процесса для отмены.")
-        return
-    
-    # Если состояние связано с broadcast, проверяем права админа
-    if current_state and "BROADCAST" in str(current_state):
-        if not is_admin(message.from_user.id):
-            await message.answer("❌ У вас нет прав для выполнения этой команды.")
-            return
-    
-    await state.clear()
-    await message.answer("✅ Операция отменена.")
 

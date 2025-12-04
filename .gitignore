@@ -85,3 +85,5 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# Broadcast logs
+features/admin/broadcast_logs/

@@ -20,6 +20,7 @@ from core.database import db
 from features.admin.broadcast import router as broadcast_router
 from core.test_markdownv2 import router as test_markdownv2_router
 from features.admin.handlers import router as admin_router
+from features.common.handlers import router as common_router
 
 
 async def register_user_handler(message):
@@ -36,10 +37,10 @@ async def setup_bot_commands(bot: Bot):
     """Setup bot commands menu."""
     commands = [
         BotCommand(command="start", description="Запустить бота"),
+        BotCommand(command="help", description="Справка по командам"),
         BotCommand(command="admin", description="Панель администратора"),
         BotCommand(command="broadcast", description="Рассылка (только для админов)"),
         BotCommand(command="test_markdownv2", description="Тест форматирования MarkdownV2"),
-        BotCommand(command="cancel", description="Отменить текущую операцию"),
     ]
     await bot.set_my_commands(commands)
 
@@ -127,17 +128,8 @@ async def main():
         # Добавляем middleware для регистрации пользователей
         dp.message.middleware(UserRegistrationMiddleware())
         
-        # Обработчик команды /start
-        @dp.message(Command("start"))
-        async def cmd_start(message):
-            await message.answer(
-                "👋 *Добро пожаловать\\!*\n\n"
-                "Это шаблон телеграм\\-бота с интеграцией ИИ через OpenRouter\\.\n\n"
-                "Используйте /admin для доступа к панели администратора\\.",
-                parse_mode="MarkdownV2"
-            )
-        
-        # Регистрируем роутеры (после обработчика /start)
+        # Регистрируем роутеры
+        dp.include_router(common_router)  # Общие команды (start, help)
         dp.include_router(broadcast_router)
         dp.include_router(admin_router)
         dp.include_router(test_markdownv2_router)

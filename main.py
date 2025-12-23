@@ -10,7 +10,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand, Message, CallbackQuery
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeDefault,
+    BotCommandScopeChat,
+    Message,
+    CallbackQuery,
+)
 from typing import Callable, Dict, Any, Awaitable
 from loguru import logger
 
@@ -21,6 +27,8 @@ from features.admin.broadcast import router as broadcast_router
 from core.test_markdownv2 import router as test_markdownv2_router
 from features.admin.handlers import router as admin_router
 from features.common.handlers import router as common_router
+from features.admin.scheduled_broadcast import router as scheduled_broadcast_router
+from features.admin.scheduler_worker import scheduler_worker
 
 
 async def register_user_handler(message):
@@ -35,14 +43,33 @@ async def register_user_handler(message):
 
 async def setup_bot_commands(bot: Bot):
     """Setup bot commands menu."""
-    commands = [
+    # Команды для всех пользователей
+    common_commands = [
         BotCommand(command="start", description="Запустить бота"),
         BotCommand(command="help", description="Справка по командам"),
+    ]
+    
+    # Дополнительные команды только для админов
+    admin_only_commands = [
         BotCommand(command="admin", description="Панель администратора"),
         BotCommand(command="broadcast", description="Рассылка (только для админов)"),
+        BotCommand(command="schedule", description="Управление расписанием постов (только для админов)"),
+        BotCommand(command="schedule_add", description="Создать запланированный пост (только для админов)"),
+        BotCommand(command="scheduled_list", description="Список запланированных постов (только для админов)"),
+        BotCommand(command="scheduled_cancel", description="Отменить запланированный пост (только для админов)"),
+        BotCommand(command="scheduled_show", description="Показать запланированный пост (только для админов)"),
         BotCommand(command="test_markdownv2", description="Тест форматирования MarkdownV2"),
     ]
-    await bot.set_my_commands(commands)
+    
+    # Устанавливаем команды по умолчанию (видны всем)
+    await bot.set_my_commands(common_commands, scope=BotCommandScopeDefault())
+    
+    # Устанавливаем команды для каждого админа в его приватном чате
+    for admin_id in Config.ADMIN_IDS:
+        await bot.set_my_commands(
+            common_commands + admin_only_commands,
+            scope=BotCommandScopeChat(chat_id=admin_id)
+        )
 
 
 async def main():
@@ -132,11 +159,16 @@ async def main():
         dp.include_router(common_router)  # Общие команды (start, help)
         dp.include_router(broadcast_router)
         dp.include_router(admin_router)
+        dp.include_router(scheduled_broadcast_router)
         dp.include_router(test_markdownv2_router)
         
         # Настраиваем команды бота
         await setup_bot_commands(bot)
         logger.info("Команды бота настроены")
+        
+        # Запускаем scheduler worker в фоне
+        asyncio.create_task(scheduler_worker(bot))
+        logger.info("Scheduler worker запущен")
         
         logger.info("Бот запущен и готов к работе")
         

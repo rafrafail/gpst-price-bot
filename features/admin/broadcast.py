@@ -9,6 +9,7 @@ from aiogram import Bot, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+from aiogram.enums import ParseMode
 from aiogram.exceptions import (
     TelegramBadRequest,
     TelegramRetryAfter,
@@ -112,7 +113,7 @@ async def send_message_to_user(
                     chat_id=user_id,
                     photo=photos[0],
                     caption=text,
-                    parse_mode="MarkdownV2",
+                    parse_mode=ParseMode.MARKDOWN_V2,
                     reply_markup=reply_markup
                 )
             else:  # has_videos
@@ -120,7 +121,7 @@ async def send_message_to_user(
                     chat_id=user_id,
                     video=videos[0],
                     caption=text,
-                    parse_mode="MarkdownV2",
+                    parse_mode=ParseMode.MARKDOWN_V2,
                     reply_markup=reply_markup
                 )
         elif total_media_count > 1:
@@ -179,7 +180,7 @@ async def send_message_to_user(
                         chat_id=user_id,
                         photo=photos[0],
                         caption=text,
-                        parse_mode="MarkdownV2",
+                        parse_mode=ParseMode.MARKDOWN_V2,
                         reply_markup=reply_markup
                     )
                 else:  # has_videos
@@ -187,7 +188,7 @@ async def send_message_to_user(
                         chat_id=user_id,
                         video=videos[0],
                         caption=text,
-                        parse_mode="MarkdownV2",
+                        parse_mode=ParseMode.MARKDOWN_V2,
                         reply_markup=reply_markup
                     )
             elif total_media_count > 1:
@@ -522,6 +523,7 @@ async def _show_preview(
     keyboard = _create_preview_keyboard(has_photos=has_media, has_buttons=has_buttons, has_error=has_error)
     
     # Формируем текст предпросмотра
+    # Текст уже правильный markdownv2, не нужно его обрабатывать
     preview_header = sanitize_markdown_v2("📋 Предпросмотр сообщения:")
     user_text_preview = text[:500] + ('...' if len(text) > 500 else '')
     
@@ -541,6 +543,7 @@ async def _show_preview(
         return
     
     # Формируем полный текст предпросмотра
+    # Важно: заголовок экранирован, пользовательский текст - нет (он уже правильный markdownv2)
     preview_text = f"{preview_header}\n\n{user_text_preview}"
     
     # Если есть кнопки, добавляем их к клавиатуре предпросмотра
@@ -561,14 +564,14 @@ async def _show_preview(
                 await message.answer_photo(
                     photo=photos[0],
                     caption=preview_text,
-                    parse_mode="MarkdownV2",
+                    parse_mode=ParseMode.MARKDOWN_V2,
                     reply_markup=preview_keyboard
                 )
             else:  # has_videos
                 await message.answer_video(
                     video=videos[0],
                     caption=preview_text,
-                    parse_mode="MarkdownV2",
+                    parse_mode=ParseMode.MARKDOWN_V2,
                     reply_markup=preview_keyboard
                 )
         elif total_media_count > 1:
@@ -720,7 +723,10 @@ async def cmd_broadcast(message: Message, state: FSMContext):
     ])
     
     await message.answer(
-        "📢 Введите текст сообщения для рассылки (поддерживается Markdown):",
+        "📢 Введите текст сообщения для рассылки (поддерживается MarkdownV2):\n\n"
+        "💡 Вы можете:\n"
+        "• Отправить текст напрямую\n"
+        "• Отправить файл .txt или .md с текстом (рекомендуется для сохранения разметки)",
         reply_markup=keyboard
     )
 
@@ -739,7 +745,7 @@ async def cancel_broadcast_on_command(message: Message, state: FSMContext):
 
 
 @router.message(ADMIN_States.BROADCAST_TEXT)
-async def process_broadcast_text(message: Message, state: FSMContext):
+async def process_broadcast_text(message: Message, state: FSMContext, bot: Bot):
     """Process broadcast text and show preview."""
     if not is_admin(message.from_user.id):
         await message.answer("❌ У вас нет прав для выполнения этой команды.")
@@ -747,6 +753,32 @@ async def process_broadcast_text(message: Message, state: FSMContext):
         return
     
     text = message.text or message.caption or ""
+    
+    # Проверяем, есть ли документ (txt или md файл)
+    if message.document:
+        file_name = message.document.file_name or ""
+        file_ext = Path(file_name).suffix.lower()
+        
+        if file_ext in ['.txt', '.md']:
+            try:
+                # Скачиваем файл
+                file_info = await bot.get_file(message.document.file_id)
+                # Создаем временный файл для скачивания
+                temp_file = Path(f"/tmp/broadcast_{message.from_user.id}_{file_info.file_id}.tmp")
+                await bot.download_file(file_info.file_path, destination=temp_file)
+                
+                # Читаем содержимое файла
+                with open(temp_file, 'r', encoding='utf-8') as f:
+                    text = f.read()
+                
+                # Удаляем временный файл
+                temp_file.unlink()
+                
+                logger.info(f"[BROADCAST] Админ {message.from_user.id} отправил файл {file_name}")
+            except Exception as e:
+                logger.error(f"[BROADCAST] Ошибка при чтении файла: {e}")
+                await message.answer(f"❌ Ошибка при чтении файла: {e}")
+                return
     
     logger.info(f"[BROADCAST] Админ {message.from_user.id} ввел текст для рассылки")
     logger.debug(f"[BROADCAST] Исходный текст (первые 200 символов): {text[:200]}")
@@ -756,6 +788,7 @@ async def process_broadcast_text(message: Message, state: FSMContext):
         await message.answer("❌ Текст не может быть пустым. Попробуйте снова.")
         return
     
+    # Текст уже правильный markdownv2, сохраняем как есть
     # Сохраняем текст в состоянии
     await state.update_data(broadcast_text=text, broadcast_photos=None, broadcast_videos=None, broadcast_buttons=None)
     

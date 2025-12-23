@@ -30,6 +30,7 @@ def sanitize_markdown_v2(text: str) -> str:
     return _MD_V2_ESCAPE_RE.sub(r"\\\1", text)
 
 
+
 def sanitize_ai_text(text: str) -> str:
     """
     Санитизирует текст от ИИ для MarkdownV2.

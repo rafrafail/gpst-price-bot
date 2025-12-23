@@ -3,6 +3,8 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from core.config import Config
+
 from core.markdown_v2 import (
     md_bold,
     md_italic,
@@ -21,9 +23,16 @@ from core.markdown_v2 import (
 router = Router()
 
 
+def is_admin(user_id: int) -> bool:
+    """Проверка, что пользователь — админ."""
+    return Config.is_admin(user_id)
+
 @router.message(Command("test_markdownv2"))
 async def cmd_test_markdownv2(message: Message):
     """Тестовая команда для проверки всех типов форматирования MarkdownV2."""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет прав для выполнения этой команды.")
+        return
     # Собираем тестовый текст с разными фичами MarkdownV2
     parts: list[str] = []
 
@@ -95,6 +104,9 @@ async def cmd_test_markdownv2(message: Message):
 @router.message(Command("test_raw"))
 async def cmd_test_raw(message: Message):
     """Тестовая команда для проверки сырого текста с MarkdownV2."""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет прав для выполнения этой команды.")
+        return
     # Текст передается как есть, без обработки
     test_text = """*📝 Тест MarkdownV2 формата*
 

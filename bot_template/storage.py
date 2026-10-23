@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import sqlite3
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -175,7 +176,18 @@ class Store:
                 ):
                     raise ValueError("legacy database detected; use a separate v2 database")
                 self.path.chmod(0o600)
-                connection.execute("PRAGMA journal_mode = WAL")
+                # journal_mode can return SQLITE_BUSY immediately during parallel
+                # first opens, even with busy_timeout; retry only this safe bootstrap.
+                deadline = time.monotonic() + 5.0
+                while True:
+                    try:
+                        connection.execute("PRAGMA journal_mode = WAL")
+                        break
+                    except sqlite3.OperationalError as exc:
+                        code = getattr(exc, "sqlite_errorcode", 0) & 0xFF
+                        if code not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} or time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.02)
                 connection.execute("BEGIN IMMEDIATE")
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
                 if version not in (0, 1):

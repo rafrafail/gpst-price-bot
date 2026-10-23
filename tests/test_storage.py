@@ -660,11 +660,13 @@ async def test_concurrent_claims_and_finishes_are_fenced_and_never_duplicate(sto
 
 
 async def test_concurrent_initialize_same_new_file_is_idempotent(tmp_path):
-    path = tmp_path / "concurrent" / "storage.sqlite3"
-    peers = [Store(path) for _ in range(8)]
-    await asyncio.gather(*(peer.initialize() for peer in peers))
-    await peers[0].register_user(OWNER)
-    assert await peers[-1].preview_audience(OWNER, "self") == [OWNER]
+    # Repeat bootstrap with fresh files: journal_mode's lock race is timing-sensitive.
+    for index in range(12):
+        path = tmp_path / f"concurrent-{index}" / "storage.sqlite3"
+        peers = [Store(path) for _ in range(8)]
+        await asyncio.gather(*(peer.initialize() for peer in peers))
+        await peers[0].register_user(OWNER)
+        assert await peers[-1].preview_audience(OWNER, "self") == [OWNER]
 
 
 async def test_snapshot_insert_failure_rolls_back_entire_launch_and_can_retry(store, validator):
@@ -704,7 +706,8 @@ async def test_pausing_running_campaign_blocks_new_claims_but_keeps_checkpoint(s
     resumed = await store.claim_delivery(NOW)
     assert resumed.user_id == OWNER
     assert resumed.next_part == 1
-    assert resumed.attempts == 2
+    # A known-safe pause is not a failed HTTP attempt and must not spend retries.
+    assert resumed.attempts == 1
     assert (await store.claim_delivery(NOW)).user_id == 202
 
 

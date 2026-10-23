@@ -1,9 +1,7 @@
 name: Template v2 checks
+# Manual diagnostic fallback only; acceptance uses the external X-CICD MCP gate.
 on:
-  push:
-    branches: [master, "hermes/**"]
-  pull_request:
-    branches: [master]
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:

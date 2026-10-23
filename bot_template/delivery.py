@@ -122,9 +122,6 @@ class DeliveryWorker:
 
     async def _send_error(self, delivery, error, now):
         if isinstance(error, TelegramRetryAfter):
-            if delivery.attempts >= self.max_attempts:
-                await self._finish(delivery, "failed", error="rate_limit_attempts_exhausted")
-                return
             # Only Telegram's explicit 429 certifies that this part was not sent.
             delay = error.retry_after
             if type(delay) is not int or delay < 0:
@@ -135,8 +132,12 @@ class DeliveryWorker:
             except OverflowError:
                 await self._finish(delivery, "failed", error="invalid_retry_after")
                 return
+            # The last allowed attempt must also pause OTHER recipients.
             self._cooldown_until = retry_at
-            await self._finish(delivery, "pending", error="rate_limited", retry_at=retry_at)
+            if delivery.attempts >= self.max_attempts:
+                await self._finish(delivery, "failed", error="rate_limit_attempts_exhausted")
+            else:
+                await self._finish(delivery, "pending", error="rate_limited", retry_at=retry_at)
         elif isinstance(error, TelegramForbiddenError):
             await self._finish(delivery, "blocked", error="telegram_forbidden")
         elif isinstance(error, TelegramBadRequest):

@@ -66,6 +66,11 @@ CREATE TABLE IF NOT EXISTS deliveries (
     UNIQUE(campaign_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS deliveries_pending ON deliveries(status, campaign_id, retry_at, id);
+CREATE TABLE IF NOT EXISTS media_groups (
+    user_id INTEGER NOT NULL REFERENCES users(user_id),
+    group_id TEXT NOT NULL,
+    PRIMARY KEY(user_id, group_id)
+);
 CREATE TABLE IF NOT EXISTS ui_state (
     user_id INTEGER PRIMARY KEY CHECK (user_id > 0),
     data TEXT NOT NULL
@@ -583,6 +588,16 @@ class Store:
             return {"total": sum(counts.values()), **counts}
 
         return await self._run(count)
+
+    async def claim_album(self, user_id: int, group_id: str) -> bool:
+        """Durable tombstone: a late/replayed group may never bind to a new input."""
+        _positive(user_id, "user_id")
+        if not isinstance(group_id, str) or not group_id:
+            raise ValueError("media group ID is required")
+        return await self._run(lambda connection: connection.execute(
+            "INSERT INTO media_groups(user_id, group_id) VALUES(?, ?) ON CONFLICT DO NOTHING",
+            (user_id, group_id),
+        ).rowcount == 1, write=True)
 
     async def get_ui(self, user_id: int) -> dict:
         _positive(user_id, "user_id")

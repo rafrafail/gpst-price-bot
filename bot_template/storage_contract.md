@@ -40,6 +40,8 @@ unauthorized/stale/non-draft operations. Tests use isolated DB only.
   attention if unknown; completed if only sent/skipped; partial if sent plus failed/blocked;
   failed if no sent and failed/blocked. Preserve paused/stopped. No false success.
 - campaign_counts(campaign_id)->dict[str,int]: total + pending/sending/sent/failed/blocked/unknown/skipped.
+- claim_album(user_id,group_id)->bool: atomically remember a media group before
+  collecting parts; late/replayed parts after flush or restart cannot bind another input.
 - get_ui(user_id)->dict: default {screen:'home',history:[],input:None,panel_id:None}.
 - save_ui(user_id,data:dict)->None: durable UI state; draft content itself lives in campaigns.
 

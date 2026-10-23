@@ -46,6 +46,10 @@ class Navigator:
 
     async def show(self, user_id: int, view: View) -> int:
         ui = await self.store.get_ui(user_id)
+        # The message ID stays constant while panels are edited. Bind actions to
+        # the current screen too, rather than accepting old callbacks by ID alone.
+        ui["panel_actions"] = [data for row in view.rows for _, data in row]
+        await self.store.save_ui(user_id, ui)
         panel = ui.get("panel_id")
         if panel:
             try:

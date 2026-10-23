@@ -65,6 +65,58 @@ async def test_database_private_and_legacy_database_is_not_migrated(tmp_path):
     assert legacy.read_bytes() == before
 
 
+async def test_stale_editor_callback_cannot_redirect_input_to_another_draft(tmp_path):
+    h = await Harness(tmp_path / "ui.sqlite3").start()
+    try:
+        first = await h.draft("Первый")
+        stale = f"edit:text:{first.id}:{first.revision}"
+        await h.press("🏠 Главное меню")
+        await h.press("📣 Рассылки")
+        await h.press("＋ Создать рассылку")
+        await h.send("Второй")
+        second = (await h.store.list_campaigns(h.uid))[0]
+        await h.click(stale)
+        ui = await h.store.get_ui(h.uid)
+        assert ui["screen"] == f"campaign:{second.id}"
+        assert ui["input"] is None
+        await h.press("✏️ Текст")
+        await h.send("Второй изменён")
+        assert (await h.store.get_campaign(first.id)).content.text == "Первый"
+        assert (await h.store.get_campaign(second.id)).content.text == "Второй изменён"
+    finally:
+        await h.close()
+
+
+@pytest.mark.parametrize("restart", [False, True])
+async def test_late_album_fragment_cannot_land_in_another_draft_after_flush(tmp_path, restart):
+    from bot_template.app import Application
+    h = await Harness(tmp_path / "ui.sqlite3").start()
+    def photo(identifier):
+        return [{"file_id": identifier, "file_unique_id": identifier,
+                 "width": 20, "height": 20}]
+    try:
+        first = await h.draft("Первый")
+        await h.press("🖼 Медиа")
+        await h.send(media_group_id="delayed", photo=photo("FIRST"))
+        await h.app.close()  # first group is already flushed and no longer buffered
+        if restart:
+            h.app = Application(h.bot, Store(h.settings.database), h.settings)
+            h.dp = h.app.dispatcher()
+        await h.press("🏠 Главное меню")
+        await h.press("📣 Рассылки")
+        await h.press("＋ Создать рассылку")
+        await h.send("Второй")
+        second = (await h.store.list_campaigns(h.uid))[0]
+        await h.press("🖼 Медиа")
+        await h.send(media_group_id="delayed", photo=photo("LATE"))
+        await h.app.close()
+        assert not (await h.store.get_campaign(second.id)).content.media
+        assert [m.file_id for m in (await h.store.get_campaign(first.id)).content.media] == ["FIRST"]
+        assert (await h.store.get_ui(h.uid))["input"]["id"] == second.id
+    finally:
+        await h.close()
+
+
 def test_native_bare_domain_preserved_without_rewriting():
     text = "example.com/path"
     content = Content(text, [{"type": "url", "offset": 0, "length": len(text)}])

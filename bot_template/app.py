@@ -268,6 +268,9 @@ class Application:
             if message.media_group_id:
                 key = (uid, message.media_group_id)
                 if key not in self.albums:
+                    if not await self.store.claim_album(uid, message.media_group_id):
+                        await self.render(uid, "Этот альбом уже обработан; запоздавшая часть не добавлена. При необходимости пришлите альбом заново целиком.")
+                        return
                     self.albums[key] = {"messages": [], "input": (await self.store.get_ui(uid)).get("input")}
                     task = asyncio.create_task(self.flush_album(key))
                     self.tasks.add(task)
@@ -378,6 +381,9 @@ class Application:
                 return
             if callback.message.message_id != ui.get("panel_id"):
                 await callback.answer("Это старое меню. Используйте /menu.", show_alert=True)
+                return
+            if data not in ui.get("panel_actions", []):
+                await callback.answer("Кнопка устарела. Используйте текущее меню или /menu.", show_alert=True)
                 return
             await callback.answer()
             try:

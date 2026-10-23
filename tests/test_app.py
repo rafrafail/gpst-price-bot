@@ -150,7 +150,8 @@ async def test_schedule_past_rejected_and_future_uses_same_worker(h):
     future = datetime.now(timezone.utc) + timedelta(days=1)
     post = await h.store.save_campaign(post.id, h.uid, expected_revision=post.revision,
                                        audience="self", scheduled_at=future.isoformat())
-    await h.click(f"confirm:{post.id}:{post.revision}")
+    await h.app.render(h.uid)  # show the new revision before clicking its actual button
+    await h.press("Продолжить к отправке")
     await h.press("✅ Подтвердить запуск")
     worker = DeliveryWorker(h.bot, h.store, pace_seconds=0)
     assert not await worker.run_once()

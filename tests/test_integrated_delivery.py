@@ -105,6 +105,41 @@ async def test_429_resumes_next_part_without_resending_first(tmp_path):
         await bot.session.close()
 
 
+async def test_exhausted_rate_limit_still_delays_other_recipients(tmp_path):
+    store = Store(tmp_path / "state.sqlite3")
+    await store.initialize()
+    for uid in (101, 202):
+        await store.register_user(uid)
+    post = await store.create_campaign(101)
+    post = await store.save_campaign(post.id, 101, expected_revision=post.revision,
+                                     content=Content("Проверка лимита"), audience="all")
+    now = datetime.now(timezone.utc)
+    post = await store.launch_campaign(post.id, 101, expected_revision=post.revision, now=now)
+
+    class LimitedSession(RecordingSession):
+        attempts = 0
+        async def make_request(self, bot, method, timeout=None):
+            if method.chat_id == 101:
+                self.attempts += 1
+                raise TelegramRetryAfter(method=method, message="rate limit",
+                                         retry_after=60 if self.attempts == 3 else 1)
+            return await super().make_request(bot, method, timeout)
+
+    session = LimitedSession()
+    bot = Bot("123456:" + "T" * 35, session=session)
+    try:
+        worker = DeliveryWorker(bot, store, pace_seconds=0)
+        for seconds in range(3):
+            assert await worker.run_once(now + timedelta(seconds=seconds))
+        assert (await store.campaign_counts(post.id))["failed"] == 1
+        assert not await worker.run_once(now + timedelta(seconds=3))
+        assert not session.calls
+        assert await worker.run_once(now + timedelta(seconds=62))
+        assert [call.chat_id for call in session.calls] == [202]
+    finally:
+        await bot.session.close()
+
+
 async def test_network_ambiguity_not_retried_against_real_store(tmp_path):
     store = Store(tmp_path / "state.sqlite3")
     post = await campaign(store, Content("Один раз"))

@@ -225,7 +225,20 @@ async def test_checkpoint_failure_never_sends_another_part(fail, caplog):
     assert store.row.next_part == (1 if fail == "after_commit" else 0)
     assert SENSITIVE not in (store.error or "") + caplog.text
     assert not await DeliveryWorker(bot, store, pace_seconds=0).run_once(NOW)
-    assert store.settles == 1
+    # Idle cycles reconcile opted-out/terminal campaigns too, without resending.
+    assert store.settles == 2
+
+
+async def test_same_chat_has_separate_pacing(monkeypatch):
+    from unittest.mock import AsyncMock
+    store = StoreDouble(Content("x" * 4001))
+    bot = BotDouble()
+    sleep = AsyncMock()
+    monkeypatch.setattr("bot_template.delivery.asyncio.sleep", sleep)
+    assert await DeliveryWorker(bot, store).run_once(NOW)
+    assert sleep.await_count == 1
+    assert sleep.await_args is not None
+    assert 0.8 < sleep.await_args.args[0] <= 1.05
 
 
 async def test_rate_limit_retries_only_the_unsent_part_and_obeys_retry_at():

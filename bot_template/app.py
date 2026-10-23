@@ -90,7 +90,7 @@ class Application:
         self.bot, self.store, self.settings = bot, store, settings
         self.nav = Navigator(bot, store)
         self.locks: dict[int, asyncio.Lock] = {}
-        self.albums: dict[tuple[int, str], list[Message]] = {}
+        self.albums: dict[tuple[int, str], dict] = {}
         self.tasks: set[asyncio.Task] = set()
 
     def lock(self, user_id: int) -> asyncio.Lock:
@@ -133,7 +133,8 @@ class Application:
             text = ("⚙️ Уведомления\n\nМассовые рассылки: "
                     + ("включены" if subscribed else "выключены")
                     + ".\nЭто не отключает ответы на ваши действия.")
-            rows = [[("Выключить рассылки" if subscribed else "Включить рассылки", "subscribe")]]
+            rows = [[("Выключить рассылки" if subscribed else "Включить рассылки",
+                      "subscribe:0" if subscribed else "subscribe:1")]]
         elif screen.startswith("example"):
             note = ui.get("note", "Пока нет заметки.")
             if screen == "example":
@@ -267,20 +268,24 @@ class Application:
             if message.media_group_id:
                 key = (uid, message.media_group_id)
                 if key not in self.albums:
-                    self.albums[key] = []
+                    self.albums[key] = {"messages": [], "input": (await self.store.get_ui(uid)).get("input")}
                     task = asyncio.create_task(self.flush_album(key))
                     self.tasks.add(task)
                     task.add_done_callback(self.tasks.discard)
-                self.albums[key].append(message)
+                self.albums[key]["messages"].append(message)
                 return
             await self.accept_messages(uid, [message])
 
     async def flush_album(self, key) -> None:
         await asyncio.sleep(0.4)
         async with self.lock(key[0]):
-            messages = self.albums.pop(key, [])
+            album = self.albums.pop(key)
             try:
-                await self.accept_messages(key[0], messages)
+                current = await self.store.get_ui(key[0])
+                if current.get("input") != album["input"]:
+                    await self.render(key[0], "Альбом относится к предыдущему шагу. Пришлите его заново в нужном редакторе.")
+                    return
+                await self.accept_messages(key[0], album["messages"])
             except Exception as exc:
                 log.warning("Album failed: %s", type(exc).__name__)
 
@@ -406,12 +411,15 @@ class Application:
             if not re.fullmatch(r"page:(draft|scheduled|active|history):\d{1,6}", data):
                 raise ValueError("Неизвестная страница.")
             await self.nav.open(uid, "list:" + data[5:], remember=False)
-        elif data == "subscribe":
-            await self.store.set_subscription(uid, not await self.store.is_subscribed(uid))
+        elif data in {"subscribe:0", "subscribe:1"}:
+            await self.store.set_subscription(uid, data == "subscribe:1")
         elif data == "note:edit":
             await self.begin_input(uid, "note", "📝 Пришлите новую заметку (до 1500 символов).")
         elif data == "new":
             self.admin(uid)
+            ui = await self.store.get_ui(uid)
+            if ui["screen"] != "broadcasts" and not ui["screen"].startswith("list:"):
+                raise ValueError("Откройте список рассылок для создания нового поста.")
             post = await self.store.create_campaign(uid)
             await self.nav.open(uid, f"campaign:{post.id}")
             await self.begin_input(uid, "text", "📣 Пришлите текст или готовый пост с фото/видео.",

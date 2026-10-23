@@ -93,6 +93,8 @@ class DeliveryWorker:
         self.pace_seconds = float(pace_seconds)
         self.max_attempts = max_attempts
         self._last_send: float | None = None
+        self._chat_sends: dict[int, float] = {}
+        self._cooldown_until: datetime | None = None
         self._lock = asyncio.Lock()
 
     async def _finish(self, delivery, status, *, error=None, retry_at=None):
@@ -108,12 +110,15 @@ class DeliveryWorker:
         except Exception:
             raise RuntimeError("Delivery checkpoint unavailable") from None
 
-    async def _pace(self):
-        loop = asyncio.get_running_loop()
-        if self._last_send is not None:
-            delay = self.pace_seconds - (loop.time() - self._last_send)
-            if delay > 0:
-                await asyncio.sleep(delay)
+    async def _pace(self, user_id: int):
+        if not self.pace_seconds:  # explicit test/embedding override
+            return
+        now = asyncio.get_running_loop().time()
+        delay = max(0.0, self.pace_seconds - (now - self._last_send)) if self._last_send is not None else 0.0
+        if user_id in self._chat_sends:
+            delay = max(delay, 1.05 - (now - self._chat_sends[user_id]))
+        if delay > 0:
+            await asyncio.sleep(delay)
 
     async def _send_error(self, delivery, error, now):
         if isinstance(error, TelegramRetryAfter):
@@ -130,6 +135,7 @@ class DeliveryWorker:
             except OverflowError:
                 await self._finish(delivery, "failed", error="invalid_retry_after")
                 return
+            self._cooldown_until = retry_at
             await self._finish(delivery, "pending", error="rate_limited", retry_at=retry_at)
         elif isinstance(error, TelegramForbiddenError):
             await self._finish(delivery, "blocked", error="telegram_forbidden")
@@ -159,7 +165,7 @@ class DeliveryWorker:
             await self._finish(delivery, "failed", error="invalid_progress")
             return
         for index in range(delivery.next_part, len(parts)):
-            await self._pace()
+            await self._pace(delivery.user_id)
             # Re-read after every checkpoint AND after the pacing await. A UI
             # pause cannot cancel HTTP already in flight, but forbids the next.
             campaign = await self.store.get_campaign(delivery.campaign_id)
@@ -176,6 +182,10 @@ class DeliveryWorker:
                 await self._finish(delivery, "skipped", error="recipient_opted_out")
                 return
             self._last_send = asyncio.get_running_loop().time()
+            self._chat_sends.pop(delivery.user_id, None)
+            self._chat_sends[delivery.user_id] = self._last_send
+            if len(self._chat_sends) > 1000:
+                self._chat_sends.pop(next(iter(self._chat_sends)))
             try:
                 await send_part(self.bot, delivery.user_id, parts[index])
             except Exception as error:
@@ -200,11 +210,16 @@ class DeliveryWorker:
         """
         claim_time = _utc_now(now)
         async with self._lock:
+            if self._cooldown_until is not None and claim_time < self._cooldown_until:
+                return False
             try:
                 delivery = await self.store.claim_delivery(claim_time)
             except Exception:
                 raise RuntimeError("Delivery claim unavailable") from None
             if delivery is None:
+                # claim_delivery may have skipped the last opted-out recipients.
+                # Recovery can also leave only unknown rows and no claimable work.
+                await self.store.settle_campaigns(claim_time)
                 return False
             try:
                 await self._deliver(delivery, now)

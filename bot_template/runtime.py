@@ -128,7 +128,7 @@ def cli() -> None:
     parser = argparse.ArgumentParser(description="Универсальный Telegram bot template v2")
     parser.add_argument("--check", action="store_true", help="Проверить конфигурацию без сети")
     args = parser.parse_args()
-    load_dotenv(override=False)
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
     try:
         settings = Settings.from_env()
         if args.check:

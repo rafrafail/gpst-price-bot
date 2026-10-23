@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -160,8 +161,20 @@ class Store:
     async def initialize(self) -> None:
         def initialize() -> None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                pass
+            else:
+                os.close(descriptor)
             connection = self._connect()
             try:
+                existing = connection.execute("PRAGMA table_info(users)").fetchall()
+                if existing and not {"user_id", "first_seen", "last_seen", "subscribed", "reachable"}.issubset(
+                    {row["name"] for row in existing}
+                ):
+                    raise ValueError("legacy database detected; use a separate v2 database")
+                self.path.chmod(0o600)
                 connection.execute("PRAGMA journal_mode = WAL")
                 connection.execute("BEGIN IMMEDIATE")
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -500,9 +513,11 @@ class Store:
 
         def finish(connection: sqlite3.Connection) -> bool:
             changed = connection.execute(
-                """UPDATE deliveries SET status = ?, error = ?, retry_at = ?, claim_token = NULL
+                """UPDATE deliveries SET status = ?, error = ?, retry_at = ?, claim_token = NULL,
+                   attempts = attempts - ?
                    WHERE id = ? AND campaign_id = ? AND user_id = ? AND claim_token = ?
-                   AND attempts = ? AND status = 'sending'""", (status, error, timestamp, *fence),
+                   AND attempts = ? AND status = 'sending'""",
+                (status, error, timestamp, int(status == "pending" and error is None), *fence),
             ).rowcount == 1
             if changed and status == "blocked":
                 connection.execute("UPDATE users SET reachable = 0 WHERE user_id = ?", (delivery.user_id,))

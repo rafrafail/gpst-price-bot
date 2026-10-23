@@ -4,10 +4,10 @@ from datetime import datetime, timezone
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.types import Message, Update
-from bot_template.storage import Store
 
 from bot_template.app import Application
 from bot_template.config import Settings
+from bot_template.storage import Store
 
 
 class RecordingSession(BaseSession):

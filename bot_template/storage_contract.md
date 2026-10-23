@@ -14,7 +14,10 @@ unauthorized/stale/non-draft operations. Tests use isolated DB only.
 - save_campaign(campaign_id, owner_id, *, expected_revision:int,
   content:Content|None=None, audience:str|None=None, scheduled_at:str|None=None,
   clear_schedule:bool=False)->Campaign. draft-only CAS, increment revision. Audience all/self.
-- launch_campaign(campaign_id,owner_id,*,expected_revision:int,now:datetime)->Campaign.
+- preview_audience(owner_id,audience)->list[int]: sorted eligible subscribed/reachable IDs.
+- launch_campaign(campaign_id,owner_id,*,expected_revision:int,now:datetime,
+  expected_recipients:list[int]|None=None)->Campaign. UI always supplies the previewed roster;
+  changed membership requires reconfirmation before any delivery rows are created.
   Atomic draft->running/scheduled + frozen per-recipient rows. Reject empty content,
   invalid buttons/media (use content.validate_content), unset audience, empty audience,
   scheduled_at <= now, stale revision. One campaign launch only. self = owner only;

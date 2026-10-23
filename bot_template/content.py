@@ -117,7 +117,22 @@ def _entities(content: Content, indices: dict[int, int]) -> list[MessageEntity]:
         elif raw.get("url") is not None:
             _validate_url(raw["url"])
         if kind == "url":
-            _validate_url(content.text[indices[offset] : indices[offset + length]])
+            # Telegram also annotates bare domains (example.com) as native URL
+            # entities. Validate their authority without rewriting the text.
+            value = content.text[indices[offset] : indices[offset + length]]
+            if "://" in value:
+                _validate_url(value)
+            else:
+                try:
+                    native = urlsplit("//" + value)
+                    if (not native.hostname or "." not in native.hostname
+                            or native.username is not None or native.password is not None
+                            or any(c.isspace() for c in value)):
+                        raise ValueError
+                    if native.port is not None and not 1 <= native.port <= 65535:
+                        raise ValueError
+                except ValueError:
+                    raise ValueError("Invalid native URL entity") from None
         if kind == "text_mention" and not raw.get("user"):
             raise ValueError("A text mention requires its native user")
         if kind == "custom_emoji" and not (

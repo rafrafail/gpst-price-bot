@@ -1,0 +1,14 @@
+# Example only. Create your private .env manually; never commit real secrets.
+BOT_TOKEN=
+ADMIN_IDS=
+BOT_TITLE=Мой бот
+BOT_TIMEZONE=Europe/Moscow
+DATABASE_PATH=data/template-v2.sqlite3
+BROADCAST_ENABLED=1
+BOT_MODE=polling
+TELEGRAM_API_BASE=https://api.telegram.org
+# Webhook only, behind your HTTPS reverse proxy:
+# WEBHOOK_URL=https://your-domain.example/telegram
+# WEBHOOK_SECRET=replace-with-a-random-secret
+# WEBHOOK_HOST=127.0.0.1
+# WEBHOOK_PORT=8080

@@ -4,9 +4,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import EditMessageText
-from bot_template.delivery import DeliveryWorker
 
 from bot_template.app import Application, parse_schedule
+from bot_template.delivery import DeliveryWorker
 from bot_template.models import Media
 from tests.helpers import Harness
 

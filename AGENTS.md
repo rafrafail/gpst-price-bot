@@ -13,6 +13,9 @@
   network outcomes are not retried automatically. No claims of exactly-once external delivery.
 - Add features inside bot_template/ without making broadcasts/AI mandatory. Example notes
   in app.py must work with BROADCAST_ENABLED=0. Avoid a framework/plugin ecosystem.
+- Acceptance CI: native X-CICD MCP, project tg-bot-template, full 40-hex SHA.
+  Read back run number, SHA, terminal status and all stages. GitHub-hosted checks
+  and local tests are supplementary, never substitutes for the external gate.
 - Tests: _work/venv/bin/python -m pytest; lint: _work/venv/bin/python -m ruff check .;
   syntax: _work/venv/bin/python -m compileall -q bot_template tests main.py.
 - Recursive tools must exclude _work/ and legacy code. Test paths use isolated tmp DBs;

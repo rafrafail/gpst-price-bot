@@ -33,6 +33,7 @@ TEMPLATE_FILES = [
     "bot_template/delivery.py",
     "bot_template/runtime.py",
     "bot_template/profile.py",
+    "bot_template/scheduling.py",
     "infra/telegram-bot-api/README.md",
     "infra/telegram-bot-api/docker-compose.yml",
     "infra/telegram-bot-api/.env.example",

@@ -116,7 +116,7 @@ def _validate_menu_order(order: list[Any] | None, known_ids: set[str]) -> list[s
         raise ValueError(f"menu.order не более {_MAX_MENU_ITEMS} пунктов")
     result = []
     # Built-in menu items that don't need sections
-    builtin_items = frozenset({"about", "preferences", "help", "broadcasts", "example"})
+    builtin_items = frozenset({"about", "preferences", "help", "broadcasts", "example", "admin"})
     for item in order:
         if not isinstance(item, str):
             raise ValueError("menu.order: элементы должны быть строками")

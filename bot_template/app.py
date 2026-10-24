@@ -181,6 +181,32 @@ class Application:
             sec = next(s for s in profile.sections if s.id == screen)
             text = f"{sec.label}\n\n{sec.text}"
             # No extra actions for static sections
+        elif screen == "admin" and user_id in self.settings.admins:
+            # Admin overview
+            total_users = await self.store.count_users()
+            subscribed_users = await self.store.count_subscribed_users()
+            reachable_users = await self.store.count_reachable_users()
+            my_campaigns = await self.store.list_campaigns(user_id, statuses=None)
+            scheduled = [c for c in my_campaigns if c.status == "scheduled"]
+            running = [c for c in my_campaigns if c.status in ("running", "paused")]
+            attention = [c for c in my_campaigns if c.status == "attention"]
+            text = (f"🔧 Администрирование\n\n"
+                    f"👥 Пользователи:\n"
+                    f"  Всего: {total_users}\n"
+                    f"  Подписаны: {subscribed_users}\n"
+                    f"  Доступны: {reachable_users}\n\n"
+                    f"📣 Ваши рассылки:\n"
+                    f"  Запланировано: {len(scheduled)}\n"
+                    f"  В работе/на паузе: {len(running)}\n"
+                    f"  Нуждаются в внимании: {len(attention)}")
+            rows = []
+            if scheduled:
+                rows.append([("📋 Запланированные", "open:list:scheduled:0")])
+            if running:
+                rows.append([("⚙️ В работе", "open:list:active:0")])
+            if attention:
+                rows.append([("⚠️ Нуждаются в внимании", "open:list:attention:0")])
+            rows.append([("📊 История", "open:list:history:0")])
         elif screen == "broadcasts":
             self.admin(user_id)
             text = "📣 Рассылки\n\nСоздайте пост или продолжите сохранённый."
@@ -193,9 +219,10 @@ class Application:
             page = max(0, int(page_text))
             states = {"draft": ["draft"], "scheduled": ["scheduled"],
                       "active": ["running", "paused"],
+                      "attention": ["attention"],
                       "history": ["completed", "partial", "failed", "stopped", "attention"]}[group]
             posts = await self.store.list_campaigns(user_id, statuses=states)
-            text = f"📣 {dict(draft='Черновики', scheduled='Запланированные', active='В работе', history='История')[group]}"
+            text = f"📣 {dict(draft='Черновики', scheduled='Запланированные', active='В работе', attention='Нуждаются в внимании', history='История')[group]}"
             if not posts:
                 text += "\n\nЗдесь пока пусто. Можно создать новую рассылку."
                 rows = [[("＋ Создать", "new")]]
@@ -477,7 +504,7 @@ class Application:
                 self.admin(uid)
             elif re.fullmatch(r"campaign:\d+", screen):
                 await self.campaign(uid, int(screen.split(":")[1]))
-            elif re.fullmatch(r"list:(draft|scheduled|active|history):\d{1,6}", screen):
+            elif re.fullmatch(r"list:(draft|scheduled|active|attention|history):\d{1,6}", screen):
                 self.admin(uid)
             elif screen == "example":
                 if not profile.example.enabled:

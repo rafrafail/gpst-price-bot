@@ -632,6 +632,15 @@ class Store:
 
         return await self._run(count)
 
+    async def count_users(self) -> int:
+        return await self._run(lambda connection: connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+
+    async def count_subscribed_users(self) -> int:
+        return await self._run(lambda connection: connection.execute("SELECT COUNT(*) FROM users WHERE subscribed = 1").fetchone()[0])
+
+    async def count_reachable_users(self) -> int:
+        return await self._run(lambda connection: connection.execute("SELECT COUNT(*) FROM users WHERE reachable = 1").fetchone()[0])
+
     async def claim_album(self, user_id: int, group_id: str) -> bool:
         """Durable tombstone: a late/replayed group may never bind to a new input."""
         _positive(user_id, "user_id")

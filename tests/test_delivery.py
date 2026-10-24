@@ -35,7 +35,7 @@ class StoreDouble:
 
     def __init__(self, content=None):
         self.campaign = Campaign(
-            1, 7, content or Content("hello"), "running", "all", None, 1, NOW.isoformat()
+            1, 7, content or Content("hello"), "running", "all", None, None, 1, NOW.isoformat(), ""
         )
         self.row = Delivery(11, 1, 42, 0, 0, "")
         self.status = "pending"

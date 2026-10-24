@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
         'partial', 'failed', 'attention'
     )),
     audience TEXT CHECK (audience IN ('all', 'self')),
+    audience_filter TEXT CHECK (audience_filter IN ('new_7d', 'active_7d', 'active_30d')),
     scheduled_at TEXT,
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
     created_at TEXT NOT NULL,
@@ -119,13 +120,21 @@ def _audience(value: str | None) -> str:
     return value
 
 
+def _audience_filter(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in ("new_7d", "active_7d", "active_30d"):
+        raise ValueError("audience_filter must be new_7d, active_7d, or active_30d")
+    return value
+
+
 def _campaign(row: sqlite3.Row) -> Campaign:
     return Campaign(
         id=row["id"], owner_id=row["owner_id"],
         content=Content.from_dict(json.loads(row["content"])), status=row["status"],
-        audience=row["audience"], scheduled_at=row["scheduled_at"],
-        revision=row["revision"], created_at=row["created_at"],
-        label=row["label"] if "label" in row.keys() else "",
+        audience=row["audience"], audience_filter=row["audience_filter"] if "audience_filter" in row.keys() else None,
+        scheduled_at=row["scheduled_at"], revision=row["revision"],
+        created_at=row["created_at"], label=row["label"] if "label" in row.keys() else "",
     )
 
 
@@ -332,6 +341,7 @@ class Store:
 
     async def save_campaign(self, campaign_id: int, owner_id: int, *, expected_revision: int,
                             content: Content | None = None, audience: str | None = None,
+                            audience_filter: str | None = None,
                             scheduled_at: str | None = None, clear_schedule: bool = False,
                             label: str | None = None) -> Campaign:
         _positive(campaign_id, "campaign_id")
@@ -342,6 +352,8 @@ class Store:
         content_json = _json(content.to_dict()) if content is not None else None
         if audience is not None:
             _audience(audience)
+        if audience_filter is not None:
+            _audience_filter(audience_filter)
         if type(clear_schedule) is not bool or (clear_schedule and scheduled_at is not None):
             raise ValueError("conflicting or invalid schedule arguments")
         if label is not None:
@@ -356,10 +368,11 @@ class Store:
             if row["status"] != "draft" or row["revision"] != expected_revision:
                 raise ValueError("campaign is not a current draft")
             connection.execute(
-                """UPDATE campaigns SET content = ?, audience = ?, scheduled_at = ?,
+                """UPDATE campaigns SET content = ?, audience = ?, audience_filter = ?, scheduled_at = ?,
                    revision = revision + 1, label = ? WHERE id = ?""",
                 (content_json if content_json is not None else row["content"],
                  audience if audience is not None else row["audience"],
+                 audience_filter if audience_filter is not None else row["audience_filter"],
                  None if clear_schedule else schedule if schedule is not None else row["scheduled_at"],
                  label if label is not None else row["label"],
                  campaign_id),
@@ -414,22 +427,23 @@ class Store:
         return await self._run(launch, write=True)
 
     async def duplicate_campaign(self, campaign_id: int, owner_id: int) -> Campaign:
-            _positive(campaign_id, "campaign_id")
-            _positive(owner_id, "owner_id")
-            now = _utc(datetime.now(timezone.utc))
+        _positive(campaign_id, "campaign_id")
+        _positive(owner_id, "owner_id")
+        now = _utc(datetime.now(timezone.utc))
 
-            def duplicate(connection: sqlite3.Connection) -> Campaign:
-                row = self._owned(connection, campaign_id, owner_id)
-                original_label = row["label"] if "label" in row.keys() else ""
-                copy_label = f"{original_label} (копия)" if original_label else "Копия"
-                cursor = connection.execute(
-                    """INSERT INTO campaigns(owner_id, content, status, audience, created_at, label)
-                       VALUES (?, ?, 'draft', ?, ?, ?)""", (owner_id, row["content"], row["audience"], now, copy_label),
-                )
-                assert cursor.lastrowid is not None
-                return _campaign(self._owned(connection, cursor.lastrowid, owner_id))
+        def duplicate(connection: sqlite3.Connection) -> Campaign:
+            row = self._owned(connection, campaign_id, owner_id)
+            original_label = row["label"] if "label" in row.keys() else ""
+            original_audience_filter = row["audience_filter"] if "audience_filter" in row.keys() else None
+            copy_label = f"{original_label} (копия)" if original_label else "Копия"
+            cursor = connection.execute(
+                """INSERT INTO campaigns(owner_id, content, status, audience, audience_filter, created_at, label)
+                   VALUES (?, ?, 'draft', ?, ?, ?, ?)""", (owner_id, row["content"], row["audience"], original_audience_filter, now, copy_label),
+            )
+            assert cursor.lastrowid is not None
+            return _campaign(self._owned(connection, cursor.lastrowid, owner_id))
 
-            return await self._run(duplicate, write=True)
+        return await self._run(duplicate, write=True)
 
     async def control_campaign(self, campaign_id: int, owner_id: int, action: str) -> Campaign:
         _positive(campaign_id, "campaign_id")

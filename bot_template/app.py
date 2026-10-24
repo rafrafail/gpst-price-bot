@@ -14,6 +14,10 @@ from bot_template.content import prepare_parts, validate_content
 from bot_template.delivery import send_part
 from bot_template.models import Button, Content, Media
 from bot_template.navigation import Navigator, View
+from bot_template.scheduling import (
+    get_schedule_options,
+    parse_relative_schedule,
+)
 
 log = logging.getLogger(__name__)
 BACK = [("← Назад", "nav:back"), ("🏠 Главное меню", "nav:home")]
@@ -218,9 +222,19 @@ class Application:
                 rows = [[("Все подписчики", f"choose:all:{key}")],
                         [("Только я (проверка)", f"choose:self:{key}")]]
             elif mode == "when":
-                text = f"🕒 Время отправки · {self.settings.timezone}"
-                rows = [[("Сейчас", f"schedule:now:{key}")],
-                        [("Выбрать дату и время", f"schedule:later:{key}")]]
+                text = f"🕒 Время отправки · {self.settings.timezone}\n\nВыберите вариант или введите свою дату:"
+                options = get_schedule_options(self.settings.timezone, datetime.now(timezone.utc))
+                rows = []
+                for opt in options:
+                    if opt["value"] == "custom":
+                        rows.append([(opt["label"], f"schedule:custom:{key}")])
+                    elif opt["value"] == "now":
+                        rows.append([(opt["label"], f"schedule:now:{key}")])
+                    else:
+                        # For presets, encode the value to avoid colon conflicts
+                        encoded_value = opt["value"].replace(" ", "_").replace(":", "-")
+                        post_id, revision = key.split(":")
+                        rows.append([(opt["label"], f"schedule:preset:{encoded_value}:{post_id}:{revision}")])
             else:
                 action = "stop" if mode == "stopask" else "retry"
                 text = ("Остановить оставшуюся отправку? Уже отправленные сообщения не отзываются."
@@ -231,7 +245,12 @@ class Application:
             audience = {None: "не выбраны", "all": "все подписчики", "self": "только я"}[post.audience]
             when = (datetime.fromisoformat(post.scheduled_at).astimezone(ZoneInfo(self.settings.timezone))
                     .strftime("%d.%m.%Y %H:%M") if post.scheduled_at else "сейчас")
+            
+            # Show label if set
+            label_line = f"Имя: {post.label}\n" if post.label else ""
+            
             text = (f"📣 Рассылка #{post.id} · {LABELS[post.status]}\n\n"
+                    f"{label_line}"
                     f"Текст: {'добавлен' if post.content.text else 'нет'}\n"
                     f"Медиа: {len(post.content.media)}\n"
                     f"Кнопок: {sum(len(row) for row in post.content.buttons)}\n"
@@ -248,9 +267,9 @@ class Application:
                 rows = [[("✅ Подтвердить запуск", f"launch:{key}")]]
             elif post.status == "draft":
                 rows = [[("✏️ Текст", f"edit:text:{key}"), ("🖼 Медиа", f"edit:media:{key}")],
-                        [("🔗 Кнопки", f"edit:buttons:{key}"), ("👥 Получатели", f"audience:{key}")],
-                        [("🕒 Когда", f"when:{key}"), ("👁 Предпросмотр", f"preview:{key}")],
-                        [("🧪 Отправить себе", f"test:{key}")],
+                        [("🔗 Кнопки", f"edit:buttons:{key}"), ("🏷 Имя", f"edit:label:{key}")],
+                        [("👥 Получатели", f"audience:{key}"), ("🕒 Когда", f"when:{key}")],
+                        [("👁 Предпросмотр", f"preview:{key}"), ("🧪 Отправить себе", f"test:{key}")],
                         [("Продолжить к отправке", f"confirm:{key}")]]
             else:
                 counts = await self.store.campaign_counts(post.id)
@@ -356,7 +375,15 @@ class Application:
                     if kind == "buttons":
                         content = replace(post.content, buttons=parse_buttons(text))
                     elif kind == "schedule":
-                        changes["scheduled_at"] = parse_schedule(text, self.settings.timezone, datetime.now(timezone.utc))
+                        changes["scheduled_at"] = parse_relative_schedule(text, self.settings.timezone, datetime.now(timezone.utc))
+                        content = post.content
+                    elif kind == "label":
+                        if text.strip() == "0":
+                            changes["label"] = ""
+                        else:
+                            if len(text) > 80:
+                                raise ValueError("Имя не длиннее 80 символов.")
+                            changes["label"] = text.strip()
                         content = post.content
                     elif kind == "media" and text.strip() == "0":
                         content = replace(post.content, media=[])
@@ -489,9 +516,24 @@ class Application:
             action = pieces[0]
             if action == "edit":
                 kind, post_id, revision = pieces[1], int(pieces[2]), int(pieces[3])
-            elif action in {"control", "choose", "schedule"}:
+            elif action in {"control", "choose"}:
                 kind, post_id = pieces[1], int(pieces[2])
                 revision = int(pieces[3]) if len(pieces) > 3 else None
+            elif action == "schedule":
+                # schedule:now:post_id:revision OR schedule:custom:post_id:revision OR schedule:preset:encoded_value:post_id:revision
+                sub_action = pieces[1]
+                if sub_action in {"now", "custom"}:
+                    kind = sub_action
+                    post_id = int(pieces[2])
+                    revision = int(pieces[3]) if len(pieces) > 3 else None
+                elif sub_action == "preset" and len(pieces) >= 5:
+                    encoded_value = pieces[2]
+                    decoded_value = encoded_value.replace("_", " ").replace("-", ":")
+                    kind = f"preset:{decoded_value}"
+                    post_id = int(pieces[3])
+                    revision = int(pieces[4])
+                else:
+                    raise ValueError("Неизвестный под-действие расписания")
             else:
                 post_id = int(pieces[1])
                 revision = int(pieces[2]) if len(pieces) > 2 else None
@@ -505,7 +547,8 @@ class Application:
                 prompts = {"text": "✏️ Пришлите новый текст с обычным форматированием Telegram.",
                            "media": "🖼 Пришлите фото, видео или альбом. 0 — убрать вложения.",
                            "buttons": "🔗 Каждая строка: Название | https://example.com\n"
-                           "Кнопки в одном ряду разделите ;\nПереходы: @home, @help, @example, @preferences.\n0 — убрать кнопки."}
+                           "Кнопки в одном ряду разделите ;\nПереходы: @home, @help, @example, @preferences.\n0 — убрать кнопки.",
+                           "label": "🏷 Пришлите внутреннее имя рассылки (до 80 символов). 0 — убрать имя."}
                 await self.begin_input(uid, kind, prompts[kind], id=post.id, revision=post.revision)
             elif action == "audience":
                 await self.nav.open(uid, f"audience:{post.id}")
@@ -518,10 +561,15 @@ class Application:
                 if kind == "now":
                     await self.store.save_campaign(post.id, uid, expected_revision=post.revision, clear_schedule=True)
                     await self.nav.back(uid)
-                elif kind == "later":
+                elif kind == "custom":
                     await self.nav.back(uid)
-                    await self.begin_input(uid, "schedule", f"🕒 Пришлите дату: ДД.ММ.ГГГГ ЧЧ:ММ\nЧасовой пояс: {self.settings.timezone}.",
+                    await self.begin_input(uid, "schedule", f"🕒 Введите дату: ДД.ММ.ГГГГ ЧЧ:ММ\nЧасовой пояс: {self.settings.timezone}.",
                                            id=post.id, revision=post.revision)
+                elif kind.startswith("preset:today ") or kind.startswith("preset:tomorrow "):
+                    # Preset option: preset:today 14:00 or preset:tomorrow 14:00
+                    scheduled_at = parse_relative_schedule(kind[7:], self.settings.timezone, datetime.now(timezone.utc))
+                    await self.store.save_campaign(post.id, uid, expected_revision=post.revision, scheduled_at=scheduled_at)
+                    await self.nav.back(uid)
                 else:
                     raise ValueError("Неизвестный способ отправки.")
             elif action in {"preview", "test"}:

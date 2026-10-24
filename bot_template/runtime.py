@@ -250,7 +250,7 @@ def cli() -> None:
             print(f"Бэкап создан: {backup_path}")
             return
         if args.restore is not None:
-            from bot_template.maintenance import restore_database, prepare_restored_for_resume
+            from bot_template.maintenance import prepare_restored_for_resume, restore_database
             assert args.restore_to is not None
             restore_database(args.restore, args.restore_to)
             changes = prepare_restored_for_resume(args.restore_to)

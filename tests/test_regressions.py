@@ -1,12 +1,6 @@
 """Regression/security checks that do not touch existing user data or credentials."""
-import ast
-import csv
 import logging
 import sqlite3
-from pathlib import Path
-from types import SimpleNamespace
-from typing import List
-from unittest.mock import AsyncMock
 
 import pytest
 

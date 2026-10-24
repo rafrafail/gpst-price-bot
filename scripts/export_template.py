@@ -3,14 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
-
 
 TEMPLATE_FILES = [
     "main.py",

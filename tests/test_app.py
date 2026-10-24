@@ -141,7 +141,7 @@ async def test_deleted_panel_recreated_but_unchanged_panel_not_duplicated(h):
 async def test_schedule_past_rejected_and_future_uses_same_worker(h):
     post = await h.draft()
     await h.press("🕒 Когда")
-    await h.press("Выбрать дату и время")
+    await h.press("Другая дата и время")
     await h.send("01.01.2001 12:00")
     assert (await h.store.get_ui(h.uid))["input"]["kind"] == "schedule"
     await h.send("/cancel")

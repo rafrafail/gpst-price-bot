@@ -220,7 +220,10 @@ class Application:
             if mode == "audience":
                 text = "👥 Кто получит рассылку?"
                 rows = [[("Все подписчики", f"choose:all:{key}")],
-                        [("Только я (проверка)", f"choose:self:{key}")]]
+                        [("Только я (проверка)", f"choose:self:{key}")],
+                        [("Новые за 7 дней", f"choose:new_7d:{key}")],
+                        [("Активные за 7 дней", f"choose:active_7d:{key}")],
+                        [("Активные за 30 дней", f"choose:active_30d:{key}")]]
             elif mode == "when":
                 text = f"🕒 Время отправки · {self.settings.timezone}\n\nВыберите вариант или введите свою дату:"
                 options = get_schedule_options(self.settings.timezone, datetime.now(timezone.utc))
@@ -553,7 +556,11 @@ class Application:
             elif action == "audience":
                 await self.nav.open(uid, f"audience:{post.id}")
             elif action == "choose":
-                await self.store.save_campaign(post.id, uid, expected_revision=post.revision, audience=kind)
+                # kind can be audience (all/self) or audience_filter (new_7d/active_7d/active_30d)
+                if kind in ("new_7d", "active_7d", "active_30d"):
+                    await self.store.save_campaign(post.id, uid, expected_revision=post.revision, audience_filter=kind)
+                else:
+                    await self.store.save_campaign(post.id, uid, expected_revision=post.revision, audience=kind)
                 await self.nav.back(uid)
             elif action == "when":
                 await self.nav.open(uid, f"when:{post.id}")

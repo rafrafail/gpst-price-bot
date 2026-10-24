@@ -12,7 +12,7 @@ import os
 import sqlite3
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 from uuid import uuid4
@@ -236,12 +236,28 @@ class Store:
         return row
 
     @staticmethod
-    def _eligible(connection: sqlite3.Connection, owner_id: int, audience: str) -> list[int]:
+    def _eligible(connection: sqlite3.Connection, owner_id: int, audience: str, audience_filter: str | None = None) -> list[int]:
         query = "SELECT user_id FROM users WHERE subscribed = 1 AND reachable = 1"
         params: tuple[int, ...] = ()
         if audience == "self":
             query += " AND user_id = ?"
             params = (owner_id,)
+        
+        # Apply audience filter
+        now_dt = datetime.now(timezone.utc)
+        if audience_filter == "new_7d":
+            cutoff = _utc(now_dt - timedelta(days=7))
+            query += " AND first_seen >= ?"
+            params += (cutoff,)
+        elif audience_filter == "active_7d":
+            cutoff = _utc(now_dt - timedelta(days=7))
+            query += " AND last_seen >= ?"
+            params += (cutoff,)
+        elif audience_filter == "active_30d":
+            cutoff = _utc(now_dt - timedelta(days=30))
+            query += " AND last_seen >= ?"
+            params += (cutoff,)
+        
         return [row[0] for row in connection.execute(query + " ORDER BY user_id", params)]
 
     async def register_user(self, user_id: int, username: str | None = None,
@@ -283,10 +299,12 @@ class Store:
 
         return await self._run(get)
 
-    async def preview_audience(self, owner_id: int, audience: str) -> list[int]:
+    async def preview_audience(self, owner_id: int, audience: str, audience_filter: str | None = None) -> list[int]:
         _positive(owner_id, "owner_id")
         _audience(audience)
-        return await self._run(lambda connection: self._eligible(connection, owner_id, audience))
+        if audience_filter is not None:
+            _audience_filter(audience_filter)
+        return await self._run(lambda connection: self._eligible(connection, owner_id, audience, audience_filter))
 
     async def create_campaign(self, owner_id: int) -> Campaign:
         _positive(owner_id, "owner_id")
@@ -409,7 +427,7 @@ class Store:
             audience = _audience(campaign.audience)
             if campaign.scheduled_at is not None and campaign.scheduled_at <= timestamp:
                 raise ValueError("scheduled_at must be in the future")
-            recipients = self._eligible(connection, owner_id, audience)
+            recipients = self._eligible(connection, owner_id, audience, campaign.audience_filter)
             if expected_recipients is not None and recipients != expected_recipients:
                 raise ValueError("audience changed; confirmation required")
             if not recipients:

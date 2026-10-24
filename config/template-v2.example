@@ -6,7 +6,13 @@ BOT_TIMEZONE=Europe/Moscow
 DATABASE_PATH=data/template-v2.sqlite3
 BROADCAST_ENABLED=1
 BOT_MODE=polling
-TELEGRAM_API_BASE=https://api.telegram.org
+
+# Telegram Bot API transport. Default cloud mode needs no api_id/api_hash.
+TELEGRAM_TRANSPORT=cloud
+# For the optional self-hosted mode only:
+# TELEGRAM_TRANSPORT=self_hosted
+# LOCAL_BOT_API_URL=http://127.0.0.1:8081
+
 # Webhook only, behind your HTTPS reverse proxy:
 # WEBHOOK_URL=https://your-domain.example/telegram
 # WEBHOOK_SECRET=replace-with-a-random-secret

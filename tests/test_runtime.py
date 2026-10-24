@@ -60,6 +60,12 @@ async def until(predicate):
             await asyncio.sleep(0.02)
 
 
+async def until_async(predicate):
+    async with asyncio.timeout(8):
+        while not await predicate():
+            await asyncio.sleep(0.02)
+
+
 def polling_consumers():
     return [
         task for task in asyncio.all_tasks()
@@ -78,6 +84,7 @@ async def test_actual_polling_entrypoint_twice_same_database(tmp_path, http_api)
         task = asyncio.create_task(serve(settings, stop))
         try:
             await until(lambda: len([m for m, _ in fake.calls if m in {"sendMessage", "editMessageText"}]) > previous)
+            await until_async(lambda: panel_saved(settings.database, 101))
         finally:
             stop.set()
             await asyncio.wait_for(task, timeout=8)
@@ -91,6 +98,10 @@ async def test_actual_polling_entrypoint_twice_same_database(tmp_path, http_api)
     # No running consumer still owns the database after either stop.
     with process_lock(settings.database):
         pass
+
+
+async def panel_saved(database, user_id):
+    return (await Store(database).get_ui(user_id))["panel_id"] is not None
 
 
 async def test_pre_stopped_polling_leaves_no_consumer(tmp_path, http_api):

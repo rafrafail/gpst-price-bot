@@ -65,6 +65,39 @@ async def make_web_app(bot, dp, secret: str) -> web.Application:
     return app
 
 
+async def stop_polling(dp, poll: asyncio.Task[None]) -> None:
+    """Stop aiogram through its own signal, then wait for its child consumers.
+
+    ``Dispatcher.start_polling`` creates private ``_polling`` tasks.  Cancelling
+    only the wrapper task skips aiogram's cancellation/await loop and can leave
+    an update consumer alive in this event loop.  That becomes a Telegram 409
+    conflict when a caller starts polling again in the same process.
+    """
+    if poll.done():
+        await poll
+        return
+    # Let a just-created wrapper acquire aiogram's running lock. This matters
+    # when the caller supplied an already-set stop event.
+    await asyncio.sleep(0)
+    if poll.done():
+        await poll
+        return
+    try:
+        await dp.stop_polling()
+    except RuntimeError:
+        # The wrapper can finish before it acquires the dispatcher lock. There
+        # are then no child consumers for aiogram to stop; cancel just that
+        # never-started wrapper and retain any real startup exception.
+        poll.cancel()
+        result = (await asyncio.gather(poll, return_exceptions=True))[0]
+        if isinstance(result, asyncio.CancelledError):
+            return
+        if isinstance(result, BaseException):
+            raise result
+        return
+    await poll
+
+
 async def serve(settings: Settings, stop: asyncio.Event | None = None) -> None:
     if not settings.token:
         raise ValueError("Для запуска задайте BOT_TOKEN. AI-ключи не нужны.")
@@ -108,9 +141,13 @@ async def serve(settings: Settings, stop: asyncio.Event | None = None) -> None:
                     done, _ = await asyncio.wait([poll, waiter], return_when=asyncio.FIRST_COMPLETED)
                     if poll in done:
                         await poll
+                    else:
+                        await stop_polling(dp, poll)
                 finally:
-                    poll.cancel()
-                    waiter.cancel()
+                    if not poll.done():
+                        poll.cancel()
+                    if not waiter.done():
+                        waiter.cancel()
                     await asyncio.gather(poll, waiter, return_exceptions=True)
         finally:
             stop.set()

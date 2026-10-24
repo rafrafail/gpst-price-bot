@@ -60,6 +60,13 @@ async def until(predicate):
             await asyncio.sleep(0.02)
 
 
+def polling_consumers():
+    return [
+        task for task in asyncio.all_tasks()
+        if not task.done() and getattr(task.get_coro(), "__qualname__", "") == "Dispatcher._polling"
+    ]
+
+
 async def test_actual_polling_entrypoint_twice_same_database(tmp_path, http_api):
     fake, url = http_api
     settings = Settings(token="123456:" + "T" * 35, admins=frozenset({101}),
@@ -74,6 +81,7 @@ async def test_actual_polling_entrypoint_twice_same_database(tmp_path, http_api)
         finally:
             stop.set()
             await asyncio.wait_for(task, timeout=8)
+        assert polling_consumers() == []
     assert len([m for m, _ in fake.calls if m == "sendMessage"]) == 1
     assert any(m == "editMessageText" for m, _ in fake.calls)
     assert len([m for m, _ in fake.calls if m == "deleteWebhook"]) == 2
@@ -83,6 +91,21 @@ async def test_actual_polling_entrypoint_twice_same_database(tmp_path, http_api)
     # No running consumer still owns the database after either stop.
     with process_lock(settings.database):
         pass
+
+
+async def test_pre_stopped_polling_leaves_no_consumer(tmp_path, http_api):
+    _, url = http_api
+    settings = Settings(
+        token="123456:" + "T" * 35,
+        api_base=url,
+        database=tmp_path / "pre-stopped.sqlite3",
+    )
+    stop = asyncio.Event()
+    stop.set()
+
+    await asyncio.wait_for(serve(settings, stop), timeout=8)
+
+    assert polling_consumers() == []
 
 
 async def test_webhook_secret_and_real_dispatcher(tmp_path, http_api):

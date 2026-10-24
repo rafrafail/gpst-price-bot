@@ -103,7 +103,7 @@ class Application:
         return dp
 
     def admin(self, user_id: int) -> None:
-        if not self.settings.broadcasts or user_id not in self.settings.admins:
+        if user_id not in self.settings.admins:
             raise ValueError("Раздел доступен только администраторам.")
 
     async def campaign(self, user_id: int, post_id: int):
@@ -172,6 +172,11 @@ class Application:
                         "Навигация не уничтожает данные.\n"
                         "Результат живёт отдельно от меню.\n"
                         "Для добавления раздела не нужен модуль рассылок или AI.")
+        # Custom profile sections
+        elif screen in {s.id for s in profile.sections}:
+            sec = next(s for s in profile.sections if s.id == screen)
+            text = f"{sec.label}\n\n{sec.text}"
+            # No extra actions for static sections
         elif screen == "broadcasts":
             self.admin(user_id)
             text = "📣 Рассылки\n\nСоздайте пост или продолжите сохранённый."
@@ -399,6 +404,11 @@ class Application:
                 # Allow profile sections
                 allowed.update(s.id for s in profile.sections)
                 if target not in allowed:
+                    if target == "example" and not profile.example.enabled:
+                        await callback.answer("Пример раздела отключён.", show_alert=True)
+                        await self.nav.home(uid)
+                        await self.render(uid, "Пример раздела отключён. Открыто главное меню.")
+                        return
                     await callback.answer("Неизвестное действие.", show_alert=True)
                     return
                 await callback.answer()
@@ -432,14 +442,19 @@ class Application:
             await self.store.save_ui(uid, ui)
         elif data.startswith("open:"):
             screen = data[5:]
+            profile = self.settings.profile
             if screen == "broadcasts":
                 self.admin(uid)
             elif re.fullmatch(r"campaign:\d+", screen):
                 await self.campaign(uid, int(screen.split(":")[1]))
             elif re.fullmatch(r"list:(draft|scheduled|active|history):\d{1,6}", screen):
                 self.admin(uid)
+            elif screen == "example":
+                if not profile.example.enabled:
+                    await self.nav.home(uid)
+                    await self.render(uid, "Пример раздела отключён. Открыто главное меню.")
+                    return
             else:
-                profile = self.settings.profile
                 allowed = {"home", "help", "preferences", "example", "example:note", "example:rules"}
                 if not profile.example.enabled:
                     allowed.discard("example")

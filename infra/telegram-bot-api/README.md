@@ -21,12 +21,13 @@ The Bot API credentials are separate from the bot token. Do not commit either
 cd infra/telegram-bot-api
 cp .env.example .env
 # Fill TELEGRAM_API_ID and TELEGRAM_API_HASH in the private .env.
-docker compose config
+docker compose config -q
 docker compose up -d
 ```
 
-`docker compose config` must complete before the container is started. The compose
-file uses the tested `aiogram/telegram-bot-api:10.3` image and `--local` mode via
+`docker compose config -q` validates without printing the resolved configuration,
+which would otherwise contain `TELEGRAM_API_HASH`. It must complete before the
+container is started. The compose file uses the tested `aiogram/telegram-bot-api:10.3` image and `--local` mode via
 `TELEGRAM_LOCAL=true`. Its data volume is private to the container; the template
 does not currently download user media to disk, so it does not require a host
 file-volume adapter.
@@ -57,9 +58,17 @@ processes together and do not use an automatic health-check fallback.
 5. Start exactly one application process. On self-hosted mode it first calls local
    `getMe`; if that fails it stops before polling or delivery begins.
 
-To return to cloud mode, stop the self-hosted bot process, set
-`TELEGRAM_TRANSPORT=cloud`, and start exactly one bot process. Do not run
-`--logout-cloud` for that direction.
+To return to cloud mode, stop the self-hosted bot process **and** stop the local
+Bot API server before changing application settings:
+
+```bash
+cd infra/telegram-bot-api
+docker compose down  # Do not add -v: it would delete the local server data.
+```
+
+After a successful `--logout-cloud`, Telegram blocks cloud login for 10 minutes.
+Wait for that interval, set `TELEGRAM_TRANSPORT=cloud`, then start exactly one
+bot process. Do not run `--logout-cloud` for this direction.
 
 ## Boundaries
 

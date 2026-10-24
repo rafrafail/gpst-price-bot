@@ -1,0 +1,34 @@
+# Template export gitignore
+# These should never be in the exported starter kit
+
+.git/
+.gitignore
+.env
+.env.*
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+data/
+_work/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+*.bundle
+*.tar.gz
+*.tgz
+*.zip
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+# Editor/IDE files

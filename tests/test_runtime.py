@@ -6,7 +6,7 @@ from aiohttp import ClientSession, web
 
 from bot_template.app import Application
 from bot_template.config import Settings
-from bot_template.runtime import make_bot, make_web_app, process_lock, serve
+from bot_template.runtime import logout_from_cloud, make_bot, make_web_app, process_lock, serve
 from bot_template.storage import Store
 
 
@@ -15,17 +15,20 @@ class BotAPIDouble:
         self.calls = []
         self.updates = []
         self.message_id = 100
+        self.fail_get_me = False
 
     async def handle(self, request):
         method = request.match_info["method"]
         data = dict(await request.post())
         self.calls.append((method, data))
         if method == "getMe":
+            if self.fail_get_me:
+                return web.json_response({"ok": False, "error_code": 500, "description": "synthetic failure"})
             result = {"id": 123456, "is_bot": True, "first_name": "Template TEST", "username": "template_test_bot"}
         elif method == "getUpdates":
             await asyncio.sleep(0.02)
             result, self.updates = self.updates, []
-        elif method in {"setMyCommands", "deleteWebhook", "setWebhook", "answerCallbackQuery"}:
+        elif method in {"setMyCommands", "deleteWebhook", "setWebhook", "answerCallbackQuery", "logOut"}:
             result = True
         else:
             self.message_id += 1
@@ -98,6 +101,54 @@ async def test_actual_polling_entrypoint_twice_same_database(tmp_path, http_api)
     # No running consumer still owns the database after either stop.
     with process_lock(settings.database):
         pass
+
+
+async def test_self_hosted_transport_probes_local_api_before_polling(tmp_path, http_api):
+    fake, url = http_api
+    settings = Settings(
+        token="123456:" + "T" * 35,
+        admins=frozenset({101}),
+        transport="self_hosted",
+        local_api_base=url,
+        database=tmp_path / "self-hosted.sqlite3",
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve(settings, stop))
+    try:
+        await until(lambda: any(method == "getMe" for method, _ in fake.calls))
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=8)
+
+    methods = [method for method, _ in fake.calls]
+    assert methods.index("getMe") < methods.index("setMyCommands")
+    assert methods.count("deleteWebhook") == 1
+    assert polling_consumers() == []
+
+
+async def test_self_hosted_transport_fails_before_polling_when_local_api_is_unavailable(tmp_path, http_api):
+    fake, url = http_api
+    fake.fail_get_me = True
+    settings = Settings(
+        token="123456:" + "T" * 35,
+        transport="self_hosted",
+        local_api_base=url,
+        database=tmp_path / "self-hosted-unavailable.sqlite3",
+    )
+
+    with pytest.raises(ValueError, match="Self-hosted Telegram Bot API недоступен"):
+        await serve(settings, asyncio.Event())
+
+    assert [method for method, _ in fake.calls] == ["getMe"]
+    assert polling_consumers() == []
+
+
+async def test_cloud_logout_uses_an_explicit_cloud_session(http_api):
+    fake, url = http_api
+
+    await logout_from_cloud("123456:" + "T" * 35, api_base=url)
+
+    assert [method for method, _ in fake.calls] == ["logOut"]
 
 
 async def panel_saved(database, user_id):

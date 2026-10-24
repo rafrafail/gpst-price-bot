@@ -15,7 +15,7 @@ from aiohttp import web
 from dotenv import load_dotenv
 
 from bot_template.app import Application
-from bot_template.config import Settings
+from bot_template.config import CLOUD_BOT_API_BASE, Settings
 from bot_template.delivery import DeliveryWorker
 from bot_template.storage import Store
 
@@ -52,8 +52,33 @@ def process_lock(database: Path):
 
 
 def make_bot(settings: Settings) -> Bot:
-    session = AiohttpSession(api=TelegramAPIServer.from_base(settings.api_base))
+    session = AiohttpSession(api=TelegramAPIServer.from_base(settings.bot_api_base))
     return Bot(settings.token, session=session)
+
+
+async def ensure_transport_ready(bot: Bot, settings: Settings) -> None:
+    """Fail closed before polling when the explicitly selected local API is down."""
+    if settings.transport != "self_hosted":
+        return
+    try:
+        await bot.get_me()
+    except Exception:
+        # Do not retain the original exception: aiogram can put a token-bearing
+        # request URL in it, and the CLI deliberately keeps transport details in logs.
+        raise ValueError(
+            "Self-hosted Telegram Bot API недоступен. Проверьте контейнер и "
+            "LOCAL_BOT_API_URL до запуска бота."
+        ) from None
+
+
+async def logout_from_cloud(token: str, api_base: str = CLOUD_BOT_API_BASE) -> None:
+    """Perform the documented cloud logout needed before a local Bot API takeover."""
+    session = AiohttpSession(api=TelegramAPIServer.from_base(api_base))
+    bot = Bot(token, session=session)
+    try:
+        await bot.log_out()
+    finally:
+        await session.close()
 
 
 async def make_web_app(bot, dp, secret: str) -> web.Application:
@@ -109,6 +134,7 @@ async def serve(settings: Settings, stop: asyncio.Event | None = None) -> None:
         tasks = []
         runner = None
         try:
+            await ensure_transport_ready(bot, settings)
             await store.initialize()
             from datetime import datetime, timezone
             await store.recover_inflight(datetime.now(timezone.utc))
@@ -168,13 +194,27 @@ async def serve(settings: Settings, stop: asyncio.Event | None = None) -> None:
 def cli() -> None:
     parser = argparse.ArgumentParser(description="Универсальный Telegram bot template v2")
     parser.add_argument("--check", action="store_true", help="Проверить конфигурацию без сети")
+    parser.add_argument(
+        "--logout-cloud",
+        action="store_true",
+        help="Выйти из облачного Bot API перед включением self-hosted режима",
+    )
     args = parser.parse_args()
+    if args.check and args.logout_cloud:
+        parser.error("--check и --logout-cloud нельзя использовать одновременно")
     load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
     try:
         settings = Settings.from_env()
         if args.check:
             print("Конфигурация корректна. AI, Redis и PostgreSQL не требуются.")
             print("BOT_TOKEN задан." if settings.token else "BOT_TOKEN не задан: живой запуск пока недоступен.")
+            return
+        if args.logout_cloud:
+            if not settings.token:
+                raise ValueError("Для --logout-cloud задайте BOT_TOKEN в .env.")
+            with process_lock(settings.database):
+                asyncio.run(logout_from_cloud(settings.token))
+            print("Cloud Bot API завершён. Запустите бота только после настройки self-hosted режима.")
             return
         handler = logging.StreamHandler()
         handler.setFormatter(SafeFormatter(settings.token))

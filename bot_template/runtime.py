@@ -144,11 +144,15 @@ async def serve(settings: Settings, stop: asyncio.Event | None = None) -> None:
                     else:
                         await stop_polling(dp, poll)
                 finally:
-                    if not poll.done():
-                        poll.cancel()
-                    if not waiter.done():
-                        waiter.cancel()
-                    await asyncio.gather(poll, waiter, return_exceptions=True)
+                    try:
+                        if not poll.done():
+                            await stop_polling(dp, poll)
+                    finally:
+                        if not poll.done():
+                            poll.cancel()
+                        if not waiter.done():
+                            waiter.cancel()
+                        await asyncio.gather(poll, waiter, return_exceptions=True)
         finally:
             stop.set()
             if runner:

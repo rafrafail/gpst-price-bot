@@ -108,6 +108,27 @@ async def test_pre_stopped_polling_leaves_no_consumer(tmp_path, http_api):
     assert polling_consumers() == []
 
 
+async def test_cancelled_polling_service_leaves_no_consumer(tmp_path, http_api):
+    fake, url = http_api
+    settings = Settings(
+        token="123456:" + "T" * 35,
+        api_base=url,
+        database=tmp_path / "cancelled.sqlite3",
+    )
+    run = asyncio.create_task(serve(settings, asyncio.Event()))
+    try:
+        await until(lambda: any(method == "getUpdates" for method, _ in fake.calls))
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(run, timeout=8)
+    finally:
+        if not run.done():
+            run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+
+    assert polling_consumers() == []
+
+
 async def test_webhook_secret_and_real_dispatcher(tmp_path, http_api):
     fake, url = http_api
     settings = Settings(token="123456:" + "T" * 35, api_base=url, database=tmp_path / "web.sqlite3")

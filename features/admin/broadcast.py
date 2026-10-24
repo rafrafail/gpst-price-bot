@@ -341,29 +341,10 @@ async def create_broadcast_text_file(
     csv_filename = _get_broadcast_filename(broadcast_id, suffix="_text")
     csv_path = broadcasts_dir / csv_filename
     
-    # Получаем URL фотографий
-    photo_urls = []
-    if photos:
-        for photo_id in photos:
-            try:
-                file = await bot.get_file(photo_id)
-                photo_url = f"https://api.telegram.org/file/bot{bot.token}/{file.file_path}"
-                photo_urls.append(photo_url)
-            except Exception as e:
-                logger.warning(f"[BROADCAST] Не удалось получить URL для фото {photo_id}: {e}")
-                photo_urls.append(photo_id)  # Используем file_id если не удалось получить URL
-    
-    # Получаем URL видео
-    video_urls = []
-    if videos:
-        for video_id in videos:
-            try:
-                file = await bot.get_file(video_id)
-                video_url = f"https://api.telegram.org/file/bot{bot.token}/{file.file_path}"
-                video_urls.append(video_url)
-            except Exception as e:
-                logger.warning(f"[BROADCAST] Не удалось получить URL для видео {video_id}: {e}")
-                video_urls.append(video_id)  # Используем file_id если не удалось получить URL
+    # Legacy export: keep Telegram file IDs, never credential-bearing download URLs.
+    # Do not call get_file here: identifiers are sufficient for an administrative export.
+    photo_urls = list(photos or [])
+    video_urls = list(videos or [])
     
     # Формируем строки для кнопок
     button_texts = []

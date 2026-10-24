@@ -7,6 +7,10 @@ DATABASE_PATH=data/template-v2.sqlite3
 BROADCAST_ENABLED=1
 BOT_MODE=polling
 
+# Public bot profile (optional). Point to a TOML file with title, welcome, help,
+# support URL, menu order, sections, and example section toggle.
+# BOT_PROFILE_PATH=config/bot-profile.toml
+
 # Telegram Bot API transport. Default cloud mode needs no api_id/api_hash.
 TELEGRAM_TRANSPORT=cloud
 # For the optional self-hosted mode only:

@@ -7,6 +7,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
+from bot_template.profile import BotProfile, load_profile_from_env
+
 CLOUD_BOT_API_BASE = "https://api.telegram.org"
 TRANSPORTS = frozenset({"cloud", "self_hosted"})
 
@@ -52,6 +54,8 @@ class Settings:
     webhook_secret: str = field(default="", repr=False)
     webhook_host: str = "127.0.0.1"
     webhook_port: int = 8080
+    # Public profile (loaded from TOML via BOT_PROFILE_PATH)
+    profile: BotProfile = field(default_factory=BotProfile)
 
     @property
     def bot_api_base(self) -> str:
@@ -97,10 +101,18 @@ class Settings:
             raise ValueError("ADMIN_IDS: нужны положительные числовые ID через запятую")
         if os.environ.get("BROADCAST_ENABLED", "1") not in {"0", "1"}:
             raise ValueError("BROADCAST_ENABLED: 0 или 1")
+
+        # Load profile first (can be overridden by explicit env vars)
+        profile = load_profile_from_env()
+
+        # Explicit env vars take priority over profile
+        title = os.environ.get("BOT_TITLE", profile.title)
+        # Help and welcome only from profile (no env overrides for now)
+
         value = cls(
             token=os.environ.get("BOT_TOKEN", ""),
             admins=frozenset(map(int, parts)),
-            title=os.environ.get("BOT_TITLE", "Мой бот"),
+            title=title,
             database=Path(os.environ.get("DATABASE_PATH", "data/template-v2.sqlite3")),
             timezone=os.environ.get("BOT_TIMEZONE", "Europe/Moscow"),
             broadcasts=os.environ.get("BROADCAST_ENABLED", "1") == "1",
@@ -112,5 +124,6 @@ class Settings:
             webhook_secret=os.environ.get("WEBHOOK_SECRET", ""),
             webhook_host=os.environ.get("WEBHOOK_HOST", "127.0.0.1"),
             webhook_port=int(os.environ.get("WEBHOOK_PORT", "8080")),
+            profile=profile,
         )
         return value

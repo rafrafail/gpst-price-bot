@@ -117,17 +117,36 @@ class Application:
         ui = await self.store.get_ui(user_id)
         screen = ui["screen"]
         rows = []
+        profile = self.settings.profile
+
         if screen == "home":
-            text = f"{self.settings.title}\n\nВыберите раздел."
-            rows = [[("🧩 Пример раздела", "open:example")],
-                    [("⚙️ Уведомления", "open:preferences"), ("❔ Помощь", "open:help")]]
-            if self.settings.broadcasts and user_id in self.settings.admins:
-                rows.append([("📣 Рассылки", "open:broadcasts")])
+            text = f"{profile.title}\n\n{profile.welcome}"
+            # Build menu from profile.order
+            for item in profile.menu_order:
+                if item == "about":
+                    # Find the 'about' section
+                    sec = next((s for s in profile.sections if s.id == "about"), None)
+                    if sec:
+                        rows.append([(sec.label, f"open:{sec.id}")])
+                elif item == "preferences":
+                    rows.append([("⚙️ Уведомления", "open:preferences")])
+                elif item == "help":
+                    rows.append([("❔ Помощь", "open:help")])
+                elif item == "broadcasts" and self.settings.broadcasts and user_id in self.settings.admins:
+                    rows.append([("📣 Рассылки", "open:broadcasts")])
+                elif item == "example" and profile.example.enabled:
+                    rows.append([("🧩 Пример раздела", "open:example")])
+                # Custom sections from profile
+                elif item not in {"about", "preferences", "help", "broadcasts", "example"}:
+                    sec = next((s for s in profile.sections if s.id == item), None)
+                    if sec:
+                        rows.append([(sec.label, f"open:{sec.id}")])
+            # Support URL if configured
+            if profile.support_url:
+                rows.append([("💬 Поддержка", profile.support_url)])
+
         elif screen == "help":
-            text = ("❔ Помощь\n\nМеню переключается в одном сообщении.\n"
-                    "«Назад» возвращает на прошлый экран. «Главное меню» не удаляет черновики.\n"
-                    "/menu — открыть меню\n/cancel — отменить текущий ввод\n"
-                    "Готовые результаты и предпросмотры остаются в переписке.")
+            text = profile.help
         elif screen == "preferences":
             subscribed = await self.store.is_subscribed(user_id)
             text = ("⚙️ Уведомления\n\nМассовые рассылки: "
@@ -136,6 +155,10 @@ class Application:
             rows = [[("Выключить рассылки" if subscribed else "Включить рассылки",
                       "subscribe:0" if subscribed else "subscribe:1")]]
         elif screen.startswith("example"):
+            if not profile.example.enabled:
+                await self.nav.home(user_id)
+                await self.render(user_id, "Пример раздела отключён. Открыто главное меню.")
+                return
             note = ui.get("note", "Пока нет заметки.")
             if screen == "example":
                 text = "🧩 Пример независимого раздела\n\nЗаметка сохраняется после перезапуска."
@@ -369,7 +392,13 @@ class Application:
             ui = await self.store.get_ui(uid)
             if data.startswith("go:"):
                 target = data[3:]
-                if target not in {"home", "help", "example", "preferences"}:
+                profile = self.settings.profile
+                allowed = {"home", "help", "preferences"}
+                if profile.example.enabled:
+                    allowed.add("example")
+                # Allow profile sections
+                allowed.update(s.id for s in profile.sections)
+                if target not in allowed:
                     await callback.answer("Неизвестное действие.", show_alert=True)
                     return
                 await callback.answer()
@@ -409,8 +438,17 @@ class Application:
                 await self.campaign(uid, int(screen.split(":")[1]))
             elif re.fullmatch(r"list:(draft|scheduled|active|history):\d{1,6}", screen):
                 self.admin(uid)
-            elif screen not in {"home", "help", "preferences", "example", "example:note", "example:rules"}:
-                raise ValueError("Неизвестный раздел.")
+            else:
+                profile = self.settings.profile
+                allowed = {"home", "help", "preferences", "example", "example:note", "example:rules"}
+                if not profile.example.enabled:
+                    allowed.discard("example")
+                    allowed.discard("example:note")
+                    allowed.discard("example:rules")
+                # Allow profile sections
+                allowed.update(s.id for s in profile.sections)
+                if screen not in allowed:
+                    raise ValueError("Неизвестный раздел.")
             await self.nav.open(uid, screen)
         elif data.startswith("page:"):
             self.admin(uid)

@@ -45,6 +45,7 @@ class Campaign:
     scheduled_at: str | None
     revision: int
     created_at: str
+    label: str = ""
 
 
 @dataclass(frozen=True)

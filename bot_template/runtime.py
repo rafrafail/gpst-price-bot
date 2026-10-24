@@ -199,9 +199,37 @@ def cli() -> None:
         action="store_true",
         help="Выйти из облачного Bot API перед включением self-hosted режима",
     )
+    parser.add_argument(
+        "--backup",
+        type=Path,
+        help="Создать верифицированный бэкап БД (только на остановленном боте)",
+    )
+    parser.add_argument(
+        "--restore",
+        type=Path,
+        help="Восстановить БД из бэкапа в НОВЫЙ файл (требует --restore-to)",
+    )
+    parser.add_argument(
+        "--restore-to",
+        type=Path,
+        help="Путь для восстановленной БД (обязателен с --restore)",
+    )
     args = parser.parse_args()
-    if args.check and args.logout_cloud:
-        parser.error("--check и --logout-cloud нельзя использовать одновременно")
+    
+    # Validate mutually exclusive args
+    action_count = sum([
+        args.check,
+        args.logout_cloud,
+        args.backup is not None,
+        args.restore is not None,
+    ])
+    if action_count > 1:
+        parser.error("Только одно из --check, --logout-cloud, --backup, --restore можно использовать за раз")
+    if args.restore is not None and args.restore_to is None:
+        parser.error("--restore требует --restore-to")
+    if args.restore_to is not None and args.restore is None:
+        parser.error("--restore-to можно использовать только с --restore")
+    
     load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
     try:
         settings = Settings.from_env()
@@ -215,6 +243,20 @@ def cli() -> None:
             with process_lock(settings.database):
                 asyncio.run(logout_from_cloud(settings.token))
             print("Cloud Bot API завершён. Запустите бота только после настройки self-hosted режима.")
+            return
+        if args.backup is not None:
+            from bot_template.maintenance import backup_database
+            backup_path = backup_database(settings.database, args.backup)
+            print(f"Бэкап создан: {backup_path}")
+            return
+        if args.restore is not None:
+            from bot_template.maintenance import restore_database, prepare_restored_for_resume
+            assert args.restore_to is not None
+            restore_database(args.restore, args.restore_to)
+            changes = prepare_restored_for_resume(args.restore_to)
+            print(f"БД восстановлена в: {args.restore_to}")
+            print(f"Изменения для безопасного resume: {changes}")
+            print("Внимание: отписки после бэкапа не восстановлены. Пользователям нужно заново включить уведомления.")
             return
         handler = logging.StreamHandler()
         handler.setFormatter(SafeFormatter(settings.token))

@@ -222,6 +222,20 @@ class Store:
                 connection.close()
 
         await asyncio.to_thread(initialize)
+        await self._migrate_add_audience_filter()
+
+    async def _migrate_add_audience_filter(self) -> None:
+        """Add audience_filter column if missing (v2→v3 migration)."""
+        def migrate() -> None:
+            connection = self._connect()
+            try:
+                cols = {row["name"] for row in connection.execute("PRAGMA table_info(campaigns)").fetchall()}
+                if "audience_filter" not in cols:
+                    connection.execute("ALTER TABLE campaigns ADD COLUMN audience_filter TEXT CHECK (audience_filter IN ('new_7d', 'active_7d', 'active_30d'))")
+                    connection.commit()
+            finally:
+                connection.close()
+        await asyncio.to_thread(migrate)
 
     async def close(self) -> None:
         """No persistent connection to close; in-flight operations own theirs."""

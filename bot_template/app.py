@@ -138,6 +138,8 @@ class Application:
                     rows.append([("❔ Помощь", "open:help")])
                 elif item == "broadcasts" and self.settings.broadcasts and user_id in self.settings.admins:
                     rows.append([("📣 Рассылки", "open:broadcasts")])
+                elif item == "admin" and user_id in self.settings.admins:
+                    rows.append([("🔧 Администрирование", "open:admin")])
                 elif item == "example" and profile.example.enabled:
                     rows.append([("🧩 Пример раздела", "open:example")])
                 # Custom sections from profile
@@ -273,6 +275,9 @@ class Application:
         elif screen.startswith(("campaign:", "confirm:")):
             post = await self.campaign(user_id, int(screen.split(":")[1]))
             audience = {None: "не выбраны", "all": "все подписчики", "self": "только я"}[post.audience]
+            if post.audience_filter:
+                filter_labels = {"new_7d": "новые за 7 дней", "active_7d": "активные за 7 дней", "active_30d": "активные за 30 дней"}
+                audience += f" · {filter_labels.get(post.audience_filter, post.audience_filter)}"
             when = (datetime.fromisoformat(post.scheduled_at).astimezone(ZoneInfo(self.settings.timezone))
                     .strftime("%d.%m.%Y %H:%M") if post.scheduled_at else "сейчас")
             
@@ -377,7 +382,10 @@ class Application:
                 await self.nav.home(uid)
             elif command == "/help":
                 await self.nav.open(uid, "help")
-            elif command in {"/admin", "/broadcast"}:
+            elif command in {"/admin"}:
+                self.admin(uid)
+                await self.nav.open(uid, "admin")
+            elif command == "/broadcast":
                 self.admin(uid)
                 await self.nav.open(uid, "broadcasts")
             elif command == "/cancel":

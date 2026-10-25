@@ -12,7 +12,7 @@ support_url = "https://t.me/example_support"
 enabled = false
 
 [menu]
-order = ["about", "preferences", "help", "broadcasts"]
+order = ["about", "broadcasts", "admin", "preferences", "help"]
 
 [[sections]]
 id = "about"

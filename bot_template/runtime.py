@@ -81,12 +81,15 @@ async def logout_from_cloud(token: str, api_base: str = CLOUD_BOT_API_BASE) -> N
         await session.close()
 
 
-async def make_web_app(bot, dp, secret: str) -> web.Application:
+async def make_web_app(bot, dp, secret: str, store, settings) -> web.Application:
     app = web.Application(client_max_size=2 * 1024 * 1024)
     # Foreground handling is intentional: no background task may outlive a closed store.
     SimpleRequestHandler(dp, bot, secret_token=secret, handle_in_background=False).register(
         app, path="/telegram"
     )
+    # Mount Mini App API (aiohttp handlers)
+    from bot_template.webapp_aiohttp import setup_webapp_routes
+    setup_webapp_routes(app, store, settings)
     return app
 
 
@@ -149,7 +152,7 @@ async def serve(settings: Settings, stop: asyncio.Event | None = None) -> None:
                 tasks.append(asyncio.create_task(DeliveryWorker(bot, store).run(stop)))
                 tasks.append(asyncio.create_task(app.status_loop(stop)))
             if settings.mode == "webhook":
-                web_app = await make_web_app(bot, dp, settings.webhook_secret)
+                web_app = await make_web_app(bot, dp, settings.webhook_secret, store, settings)
                 runner = web.AppRunner(web_app, access_log=None)
                 await runner.setup()
                 await web.TCPSite(runner, settings.webhook_host, settings.webhook_port).start()

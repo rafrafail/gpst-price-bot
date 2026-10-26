@@ -77,6 +77,35 @@ CREATE TABLE IF NOT EXISTS ui_state (
     user_id INTEGER PRIMARY KEY CHECK (user_id > 0),
     data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS payments (
+    uid TEXT PRIMARY KEY,
+    tg_user_id INTEGER NOT NULL CHECK (tg_user_id > 0),
+    plan_code TEXT NOT NULL,
+    plan_period TEXT,
+    plan_days INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'succeeded', 'failed', 'expired', 'refunded')),
+    provider TEXT NOT NULL DEFAULT 'card' CHECK (provider IN ('card', 'manual')),
+    provider_ref TEXT,
+    subscription_id TEXT,
+    expires_at TEXT,
+    email TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS payments_user ON payments(tg_user_id, created_at);
+CREATE TABLE IF NOT EXISTS webapp_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id INTEGER NOT NULL CHECK (tenant_id > 0),
+    tg_user_id INTEGER NOT NULL CHECK (tg_user_id > 0),
+    chat_id INTEGER NOT NULL CHECK (chat_id > 0),
+    text TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'case',
+    case_id TEXT,
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'failed')),
+    created_at TEXT NOT NULL,
+    expires_at TEXT
+);
+CREATE INDEX IF NOT EXISTS webapp_tasks_tenant ON webapp_tasks(tenant_id, status);
 """
 
 
@@ -686,3 +715,123 @@ class Store:
             "INSERT INTO ui_state(user_id, data) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET data = excluded.data",
             (user_id, serialized),
         ).rowcount, write=True)
+
+    # ── payments (webapp) ────────────────────────────────────────────────
+
+    async def create_payment(self, *, uid: str, tg_user_id: int, plan_code: str,
+                             plan_period: str | None, plan_days: int | None,
+                             provider: str, email: str | None) -> None:
+        _positive(tg_user_id, "tg_user_id")
+        if not uid or not isinstance(uid, str):
+            raise ValueError("payment uid required")
+        if not plan_code:
+            raise ValueError("plan_code required")
+        if provider not in ("card", "manual"):
+            raise ValueError("provider must be card or manual")
+        now = _utc(datetime.now(timezone.utc))
+        await self._run(lambda connection: connection.execute(
+            """INSERT INTO payments(uid, tg_user_id, plan_code, plan_period, plan_days,
+                  status, provider, email, created_at, updated_at)
+               VALUES(?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)""",
+            (uid, tg_user_id, plan_code, plan_period, plan_days, provider, email, now, now),
+        ).rowcount, write=True)
+
+    async def get_payment(self, uid: str) -> dict | None:
+        if not uid:
+            return None
+        return await self._run(lambda connection: connection.execute(
+            "SELECT * FROM payments WHERE uid = ?", (uid,)
+        ).fetchone())
+
+    async def get_payment_by_provider_ref(self, provider_ref: str) -> dict | None:
+        if not provider_ref:
+            return None
+        return await self._run(lambda connection: connection.execute(
+            "SELECT * FROM payments WHERE provider_ref = ?", (provider_ref,)
+        ).fetchone())
+
+    async def set_payment_provider_ref(self, uid: str, provider_ref: str,
+                                        pay_url: str | None = None,
+                                        subscription_id: str | None = None,
+                                        expires_at: str | None = None) -> None:
+        now = _utc(datetime.now(timezone.utc))
+        await self._run(lambda connection: connection.execute(
+            """UPDATE payments SET provider_ref = ?, subscription_id = ?, expires_at = ?,
+                  updated_at = ? WHERE uid = ?""",
+            (provider_ref, subscription_id, expires_at, now, uid),
+        ).rowcount, write=True)
+
+    async def set_payment_status(self, uid: str, status: str) -> None:
+        if status not in ("pending", "succeeded", "failed", "expired", "refunded"):
+            raise ValueError("invalid payment status")
+        now = _utc(datetime.now(timezone.utc))
+        await self._run(lambda connection: connection.execute(
+            "UPDATE payments SET status = ?, updated_at = ? WHERE uid = ?",
+            (status, now, uid),
+        ).rowcount, write=True)
+
+    async def expire_pending_payments(self, ttl_hours: int) -> int:
+        if ttl_hours <= 0:
+            return 0
+        cutoff = _utc(datetime.now(timezone.utc) - timedelta(hours=ttl_hours))
+        return await self._run(lambda connection: connection.execute(
+            "UPDATE payments SET status = 'expired', updated_at = ? WHERE status = 'pending' AND created_at < ?",
+            (_utc(datetime.now(timezone.utc)), cutoff),
+        ).rowcount, write=True)
+
+    # ── webapp_tasks (case execution from Mini App) ────────────────────
+
+    async def queue_webapp_task(self, *, tenant_id: int, tg_user_id: int,
+                                chat_id: int, text: str, source: str,
+                                case_id: str | None, ttl_hours: int | None = None) -> dict:
+        _positive(tenant_id, "tenant_id")
+        _positive(tg_user_id, "tg_user_id")
+        _positive(chat_id, "chat_id")
+        if not text:
+            raise ValueError("text required")
+        now = _utc(datetime.now(timezone.utc))
+        expires_at = None
+        if ttl_hours and ttl_hours > 0:
+            expires_at = _utc(datetime.now(timezone.utc) + timedelta(hours=ttl_hours))
+        task_id = await self._run(lambda connection: connection.execute(
+            """INSERT INTO webapp_tasks(tenant_id, tg_user_id, chat_id, text, source, case_id,
+                  status, created_at, expires_at)
+               VALUES(?, ?, ?, ?, ?, ?, 'queued', ?, ?)""",
+            (tenant_id, tg_user_id, chat_id, text, source, case_id, now, expires_at),
+        ).lastrowid, write=True)
+        return {"id": task_id}
+
+    async def count_queued_webapp_tasks(self, tenant_id: int) -> int:
+        _positive(tenant_id, "tenant_id")
+        return await self._run(lambda connection: connection.execute(
+            "SELECT COUNT(*) FROM webapp_tasks WHERE tenant_id = ? AND status = 'queued'",
+            (tenant_id,),
+        ).fetchone()[0])
+
+    async def get_webapp_task(self, task_id: int) -> dict | None:
+        return await self._run(lambda connection: connection.execute(
+            "SELECT * FROM webapp_tasks WHERE id = ?", (task_id,)
+        ).fetchone())
+
+    async def mark_webapp_task_sent(self, task_id: int) -> bool:
+        return await self._run(lambda connection: connection.execute(
+            "UPDATE webapp_tasks SET status = 'sent' WHERE id = ? AND status = 'queued'",
+            (task_id,),
+        ).rowcount == 1, write=True)
+
+    async def mark_webapp_task_failed(self, task_id: int) -> bool:
+        return await self._run(lambda connection: connection.execute(
+            "UPDATE webapp_tasks SET status = 'failed' WHERE id = ? AND status = 'queued'",
+            (task_id,),
+        ).rowcount == 1, write=True)
+
+    async def expire_webapp_tasks(self, ttl_hours: int) -> int:
+        if ttl_hours <= 0:
+            return 0
+        cutoff = _utc(datetime.now(timezone.utc) - timedelta(hours=ttl_hours))
+        return await self._run(lambda connection: connection.execute(
+            "UPDATE webapp_tasks SET status = 'failed' WHERE status = 'queued' AND created_at < ?",
+            (cutoff,),
+        ).rowcount, write=True)
+
+    MAX_QUEUED_PER_TENANT = 5

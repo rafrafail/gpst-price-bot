@@ -198,7 +198,7 @@ async def test_webhook_secret_and_real_dispatcher(tmp_path, http_api):
     store = Store(settings.database)
     await store.initialize()
     application = Application(bot, store, settings)
-    server = await make_web_app(bot, application.dispatcher(), "test_secret")
+    server = await make_web_app(bot, application.dispatcher(), "test_secret", store, settings)
     runner = web.AppRunner(server, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)

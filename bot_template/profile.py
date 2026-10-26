@@ -36,6 +36,7 @@ class BotProfile:
         "Готовые результаты и предпросмотры остаются в переписке."
     )
     support_url: str | None = None
+    bot_username: str | None = None  # @username бота для ссылок (t.me/username)
     menu_order: list[str] = field(default_factory=lambda: ["about", "example", "preferences", "help", "broadcasts"])
     sections: list[ProfileSection] = field(default_factory=list)
     example: ExampleConfig = field(default_factory=ExampleConfig)
@@ -202,11 +203,21 @@ def load_profile(path: Path | str | None) -> BotProfile:
     support_url = bot_data.get("support_url")
     _validate_url(support_url)
 
+    bot_username = bot_data.get("bot_username")
+    if bot_username is not None:
+        if not isinstance(bot_username, str):
+            raise ValueError("bot.bot_username должна быть строкой")
+        if bot_username.startswith("@"):
+            bot_username = bot_username[1:]
+        if not bot_username:
+            bot_username = None
+
     return BotProfile(
         title=title.strip(),
         welcome=welcome,
         help=help_text,
         support_url=support_url,
+        bot_username=bot_username,
         menu_order=menu_order,
         sections=sections,
         example=example,

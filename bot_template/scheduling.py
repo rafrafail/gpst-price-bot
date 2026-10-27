@@ -35,39 +35,37 @@ def parse_relative_schedule(text: str, tz: str, now: datetime) -> str:
     return parse_exact_schedule(text, tz, now)
 
 
-def _parse_time_today(time_str: str, zone: ZoneInfo, now: datetime) -> str:
-    """Parse 'today HH:MM' format."""
+def _resolve_local_time(day, time_str: str, zone: ZoneInfo, now: datetime, allow_past: bool) -> str:
+    """Resolve 'HH:MM' on a given local date to UTC ISO, rejecting DST gaps/ambiguity."""
     try:
         hour, minute = map(int, time_str.split(":"))
         if not (0 <= hour <= 23 and 0 <= minute <= 59):
             raise ValueError
     except ValueError:
-        raise ValueError("Нужно время в формате ЧЧ:ММ (например, 14:30)")
-    
-    today = now.astimezone(zone).date()
-    local = datetime(today.year, today.month, today.day, hour, minute, tzinfo=zone)
-    utc = local.astimezone(timezone.utc)
-    
-    if utc <= now:
+        raise ValueError("Нужно время в формате ЧЧ:ММ (например, 14:30)") from None
+
+    first = datetime(day.year, day.month, day.day, hour, minute, tzinfo=zone, fold=0)
+    second = first.replace(fold=1)
+    if first.utcoffset() != second.utcoffset():
+        raise ValueError("Время попало на перевод часов. Выберите другое время.")
+    utc = first.astimezone(timezone.utc)
+    if utc.astimezone(zone).replace(tzinfo=None) != datetime(day.year, day.month, day.day, hour, minute):
+        raise ValueError("Такого местного времени нет. Выберите другое время.")
+    if not allow_past and utc <= now:
         raise ValueError("Это время уже прошло. Выберите будущее время или «Сейчас».")
-    
     return utc.isoformat()
+
+
+def _parse_time_today(time_str: str, zone: ZoneInfo, now: datetime) -> str:
+    """Parse 'today HH:MM' format."""
+    today = now.astimezone(zone).date()
+    return _resolve_local_time(today, time_str, zone, now, allow_past=False)
 
 
 def _parse_time_tomorrow(time_str: str, zone: ZoneInfo, now: datetime) -> str:
     """Parse 'tomorrow HH:MM' format."""
-    try:
-        hour, minute = map(int, time_str.split(":"))
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except ValueError:
-        raise ValueError("Нужно время в формате ЧЧ:ММ (например, 14:30)")
-    
     tomorrow = now.astimezone(zone).date() + timedelta(days=1)
-    local = datetime(tomorrow.year, tomorrow.month, tomorrow.day, hour, minute, tzinfo=zone)
-    utc = local.astimezone(timezone.utc)
-    
-    return utc.isoformat()
+    return _resolve_local_time(tomorrow, time_str, zone, now, allow_past=True)
 
 
 def parse_exact_schedule(text: str, tz: str, now: datetime) -> str:

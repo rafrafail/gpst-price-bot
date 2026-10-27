@@ -110,6 +110,12 @@ class Application:
         if user_id not in self.settings.admins:
             raise ValueError("Раздел доступен только администраторам.")
 
+    def require_broadcasts(self, user_id: int) -> None:
+        """Admin gate + product gate: broadcasts must be enabled for the bot."""
+        self.admin(user_id)
+        if not self.settings.broadcasts:
+            raise ValueError("Рассылки отключены в конфигурации этого бота.")
+
     async def campaign(self, user_id: int, post_id: int):
         self.admin(user_id)
         post = await self.store.get_campaign(post_id, owner_id=user_id)
@@ -210,13 +216,13 @@ class Application:
                 rows.append([("⚠️ Нуждаются в внимании", "open:list:attention:0")])
             rows.append([("📊 История", "open:list:history:0")])
         elif screen == "broadcasts":
-            self.admin(user_id)
+            self.require_broadcasts(user_id)
             text = "📣 Рассылки\n\nСоздайте пост или продолжите сохранённый."
             rows = [[("＋ Создать рассылку", "new")],
                     [("Черновики", "open:list:draft:0"), ("Запланированные", "open:list:scheduled:0")],
                     [("В работе", "open:list:active:0"), ("История", "open:list:history:0")]]
         elif screen.startswith("list:"):
-            self.admin(user_id)
+            self.require_broadcasts(user_id)
             _, group, page_text = screen.split(":")
             page = max(0, int(page_text))
             states = {"draft": ["draft"], "scheduled": ["scheduled"],
@@ -386,7 +392,7 @@ class Application:
                 self.admin(uid)
                 await self.nav.open(uid, "admin")
             elif command == "/broadcast":
-                self.admin(uid)
+                self.require_broadcasts(uid)
                 await self.nav.open(uid, "broadcasts")
             elif command == "/cancel":
                 ui = await self.store.get_ui(uid)
@@ -509,11 +515,11 @@ class Application:
             screen = data[5:]
             profile = self.settings.profile
             if screen == "broadcasts":
-                self.admin(uid)
+                self.require_broadcasts(uid)
             elif re.fullmatch(r"campaign:\d+", screen):
                 await self.campaign(uid, int(screen.split(":")[1]))
             elif re.fullmatch(r"list:(draft|scheduled|active|attention|history):\d{1,6}", screen):
-                self.admin(uid)
+                self.require_broadcasts(uid)
             elif screen == "example":
                 if not profile.example.enabled:
                     await self.nav.home(uid)
@@ -531,7 +537,7 @@ class Application:
                     raise ValueError("Неизвестный раздел.")
             await self.nav.open(uid, screen)
         elif data.startswith("page:"):
-            self.admin(uid)
+            self.require_broadcasts(uid)
             if not re.fullmatch(r"page:(draft|scheduled|active|history):\d{1,6}", data):
                 raise ValueError("Неизвестная страница.")
             await self.nav.open(uid, "list:" + data[5:], remember=False)
@@ -540,7 +546,7 @@ class Application:
         elif data == "note:edit":
             await self.begin_input(uid, "note", "📝 Пришлите новую заметку (до 1500 символов).")
         elif data == "new":
-            self.admin(uid)
+            self.require_broadcasts(uid)
             ui = await self.store.get_ui(uid)
             if ui["screen"] != "broadcasts" and not ui["screen"].startswith("list:"):
                 raise ValueError("Откройте список рассылок для создания нового поста.")
@@ -549,7 +555,7 @@ class Application:
             await self.begin_input(uid, "text", "📣 Пришлите текст или готовый пост с фото/видео.",
                                    id=post.id, revision=post.revision)
         else:
-            self.admin(uid)
+            self.require_broadcasts(uid)
             pieces = data.split(":")
             action = pieces[0]
             if action == "edit":
@@ -593,9 +599,13 @@ class Application:
             elif action == "choose":
                 # kind can be audience (all/self) or audience_filter (new_7d/active_7d/active_30d)
                 if kind in ("new_7d", "active_7d", "active_30d"):
+                    if post.audience != "all":
+                        raise ValueError("Фильтр применяется только к группе «Все подписчики».")
                     await self.store.save_campaign(post.id, uid, expected_revision=post.revision, audience_filter=kind)
                 else:
-                    await self.store.save_campaign(post.id, uid, expected_revision=post.revision, audience=kind)
+                    # all/self resets any stale filter so confirmation matches launch
+                    await self.store.save_campaign(post.id, uid, expected_revision=post.revision,
+                                                   audience=kind, audience_filter=None)
                 await self.nav.back(uid)
             elif action == "when":
                 await self.nav.open(uid, f"when:{post.id}")
@@ -624,7 +634,7 @@ class Application:
                 validate_content(post.content)
                 if post.audience is None:
                     raise ValueError("Сначала выберите получателей.")
-                recipients = await self.store.preview_audience(uid, post.audience)
+                recipients = await self.store.preview_audience(uid, post.audience, post.audience_filter)
                 if not recipients:
                     raise ValueError("Нет доступных подписчиков. Проверьте настройки уведомлений.")
                 await self.nav.open(uid, f"confirm:{post.id}")

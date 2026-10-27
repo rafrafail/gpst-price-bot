@@ -93,19 +93,6 @@ CREATE TABLE IF NOT EXISTS payments (
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS payments_user ON payments(tg_user_id, created_at);
-CREATE TABLE IF NOT EXISTS webapp_tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tenant_id INTEGER NOT NULL CHECK (tenant_id > 0),
-    tg_user_id INTEGER NOT NULL CHECK (tg_user_id > 0),
-    chat_id INTEGER NOT NULL CHECK (chat_id > 0),
-    text TEXT NOT NULL,
-    source TEXT NOT NULL DEFAULT 'case',
-    case_id TEXT,
-    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'failed')),
-    created_at TEXT NOT NULL,
-    expires_at TEXT
-);
-CREATE INDEX IF NOT EXISTS webapp_tasks_tenant ON webapp_tasks(tenant_id, status);
 """
 
 
@@ -235,14 +222,27 @@ class Store:
                         time.sleep(0.02)
                 connection.execute("BEGIN IMMEDIATE")
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1):
+                if version not in (0, 1, 2, 3):
                     raise ValueError("unsupported storage schema version")
                 # executescript implicitly commits, so execute the fixed DDL
                 # statements separately to keep initialization transactional.
                 for statement in _SCHEMA.split(";"):
                     if statement.strip():
                         connection.execute(statement)
-                connection.execute("PRAGMA user_version = 1")
+                if version < 3:
+                    if version == 1:
+                        # v1 -> v2: campaigns.label (internal name, plan B1)
+                        label_cols = {row["name"] for row in connection.execute("PRAGMA table_info(campaigns)").fetchall()}
+                        if "label" not in label_cols:
+                            connection.execute("ALTER TABLE campaigns ADD COLUMN label TEXT NOT NULL DEFAULT ''")
+                    # v2 -> v3: campaigns.audience_filter (plan C1)
+                    camp_cols = {row["name"] for row in connection.execute("PRAGMA table_info(campaigns)").fetchall()}
+                    if "audience_filter" not in camp_cols:
+                        connection.execute(
+                            "ALTER TABLE campaigns ADD COLUMN audience_filter TEXT "
+                            "CHECK (audience_filter IN ('new_7d', 'active_7d', 'active_30d'))"
+                        )
+                connection.execute("PRAGMA user_version = 3")
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -251,20 +251,6 @@ class Store:
                 connection.close()
 
         await asyncio.to_thread(initialize)
-        await self._migrate_add_audience_filter()
-
-    async def _migrate_add_audience_filter(self) -> None:
-        """Add audience_filter column if missing (v2→v3 migration)."""
-        def migrate() -> None:
-            connection = self._connect()
-            try:
-                cols = {row["name"] for row in connection.execute("PRAGMA table_info(campaigns)").fetchall()}
-                if "audience_filter" not in cols:
-                    connection.execute("ALTER TABLE campaigns ADD COLUMN audience_filter TEXT CHECK (audience_filter IN ('new_7d', 'active_7d', 'active_30d'))")
-                    connection.commit()
-            finally:
-                connection.close()
-        await asyncio.to_thread(migrate)
 
     async def close(self) -> None:
         """No persistent connection to close; in-flight operations own theirs."""
@@ -281,25 +267,25 @@ class Store:
     @staticmethod
     def _eligible(connection: sqlite3.Connection, owner_id: int, audience: str, audience_filter: str | None = None) -> list[int]:
         query = "SELECT user_id FROM users WHERE subscribed = 1 AND reachable = 1"
-        params: tuple[int, ...] = ()
+        params: list[Any] = []
         if audience == "self":
             query += " AND user_id = ?"
-            params = (owner_id,)
+            params.append(owner_id)
         
-        # Apply audience filter
+        # Apply audience filter: bounded window [now - N days, now]
         now_dt = datetime.now(timezone.utc)
         if audience_filter == "new_7d":
             cutoff = _utc(now_dt - timedelta(days=7))
-            query += " AND first_seen >= ?"
-            params += (cutoff,)
+            query += " AND first_seen >= ? AND first_seen <= ?"
+            params += (cutoff, _utc(now_dt))
         elif audience_filter == "active_7d":
             cutoff = _utc(now_dt - timedelta(days=7))
-            query += " AND last_seen >= ?"
-            params += (cutoff,)
+            query += " AND last_seen >= ? AND last_seen <= ?"
+            params += (cutoff, _utc(now_dt))
         elif audience_filter == "active_30d":
             cutoff = _utc(now_dt - timedelta(days=30))
-            query += " AND last_seen >= ?"
-            params += (cutoff,)
+            query += " AND last_seen >= ? AND last_seen <= ?"
+            params += (cutoff, _utc(now_dt))
         
         return [row[0] for row in connection.execute(query + " ORDER BY user_id", params)]
 
@@ -778,60 +764,3 @@ class Store:
             "UPDATE payments SET status = 'expired', updated_at = ? WHERE status = 'pending' AND created_at < ?",
             (_utc(datetime.now(timezone.utc)), cutoff),
         ).rowcount, write=True)
-
-    # ── webapp_tasks (case execution from Mini App) ────────────────────
-
-    async def queue_webapp_task(self, *, tenant_id: int, tg_user_id: int,
-                                chat_id: int, text: str, source: str,
-                                case_id: str | None, ttl_hours: int | None = None) -> dict:
-        _positive(tenant_id, "tenant_id")
-        _positive(tg_user_id, "tg_user_id")
-        _positive(chat_id, "chat_id")
-        if not text:
-            raise ValueError("text required")
-        now = _utc(datetime.now(timezone.utc))
-        expires_at = None
-        if ttl_hours and ttl_hours > 0:
-            expires_at = _utc(datetime.now(timezone.utc) + timedelta(hours=ttl_hours))
-        task_id = await self._run(lambda connection: connection.execute(
-            """INSERT INTO webapp_tasks(tenant_id, tg_user_id, chat_id, text, source, case_id,
-                  status, created_at, expires_at)
-               VALUES(?, ?, ?, ?, ?, ?, 'queued', ?, ?)""",
-            (tenant_id, tg_user_id, chat_id, text, source, case_id, now, expires_at),
-        ).lastrowid, write=True)
-        return {"id": task_id}
-
-    async def count_queued_webapp_tasks(self, tenant_id: int) -> int:
-        _positive(tenant_id, "tenant_id")
-        return await self._run(lambda connection: connection.execute(
-            "SELECT COUNT(*) FROM webapp_tasks WHERE tenant_id = ? AND status = 'queued'",
-            (tenant_id,),
-        ).fetchone()[0])
-
-    async def get_webapp_task(self, task_id: int) -> dict | None:
-        return await self._run(lambda connection: connection.execute(
-            "SELECT * FROM webapp_tasks WHERE id = ?", (task_id,)
-        ).fetchone())
-
-    async def mark_webapp_task_sent(self, task_id: int) -> bool:
-        return await self._run(lambda connection: connection.execute(
-            "UPDATE webapp_tasks SET status = 'sent' WHERE id = ? AND status = 'queued'",
-            (task_id,),
-        ).rowcount == 1, write=True)
-
-    async def mark_webapp_task_failed(self, task_id: int) -> bool:
-        return await self._run(lambda connection: connection.execute(
-            "UPDATE webapp_tasks SET status = 'failed' WHERE id = ? AND status = 'queued'",
-            (task_id,),
-        ).rowcount == 1, write=True)
-
-    async def expire_webapp_tasks(self, ttl_hours: int) -> int:
-        if ttl_hours <= 0:
-            return 0
-        cutoff = _utc(datetime.now(timezone.utc) - timedelta(hours=ttl_hours))
-        return await self._run(lambda connection: connection.execute(
-            "UPDATE webapp_tasks SET status = 'failed' WHERE status = 'queued' AND created_at < ?",
-            (cutoff,),
-        ).rowcount, write=True)
-
-    MAX_QUEUED_PER_TENANT = 5

@@ -65,11 +65,15 @@ def backup_database(source_path: Path, backup_dir: Path) -> Path:
     finally:
         src_conn.close()
     
-    # Verify backup integrity
+    # Verify backup integrity (checks must actually pass, not just run)
     verify_conn = sqlite3.connect(str(backup_path))
     try:
-        verify_conn.execute("PRAGMA integrity_check")
-        verify_conn.execute("PRAGMA foreign_key_check")
+        integrity = verify_conn.execute("PRAGMA integrity_check").fetchone()[0]
+        if integrity != "ok":
+            raise ValueError(f"Backup integrity check failed: {integrity}")
+        fk_violations = verify_conn.execute("PRAGMA foreign_key_check").fetchall()
+        if fk_violations:
+            raise ValueError(f"Backup foreign key check failed: {len(fk_violations)} violations")
         # Verify schema version
         version = verify_conn.execute("PRAGMA user_version").fetchone()[0]
         if version != 1:
@@ -107,11 +111,15 @@ def restore_database(backup_path: Path, target_path: Path) -> None:
     if backup_path.is_symlink() or target_path.is_symlink():
         raise ValueError("Symlinks not allowed")
     
-    # Verify backup first
+    # Verify backup first (results must actually pass)
     verify_conn = sqlite3.connect(str(backup_path))
     try:
-        verify_conn.execute("PRAGMA integrity_check")
-        verify_conn.execute("PRAGMA foreign_key_check")
+        integrity = verify_conn.execute("PRAGMA integrity_check").fetchone()[0]
+        if integrity != "ok":
+            raise ValueError(f"Backup integrity check failed: {integrity}")
+        fk_violations = verify_conn.execute("PRAGMA foreign_key_check").fetchall()
+        if fk_violations:
+            raise ValueError(f"Backup foreign key check failed: {len(fk_violations)} violations")
         version = verify_conn.execute("PRAGMA user_version").fetchone()[0]
         if version != 1:
             raise ValueError(f"Backup has unsupported schema version: {version}")
@@ -125,11 +133,15 @@ def restore_database(backup_path: Path, target_path: Path) -> None:
         shutil.copy2(backup_path, temp_path)
         temp_path.chmod(0o600)
         
-        # Verify the copy
+        # Verify the copy (results must actually pass)
         verify_conn = sqlite3.connect(str(temp_path))
         try:
-            verify_conn.execute("PRAGMA integrity_check")
-            verify_conn.execute("PRAGMA foreign_key_check")
+            integrity = verify_conn.execute("PRAGMA integrity_check").fetchone()[0]
+            if integrity != "ok":
+                raise ValueError(f"Restored copy integrity check failed: {integrity}")
+            fk_violations = verify_conn.execute("PRAGMA foreign_key_check").fetchall()
+            if fk_violations:
+                raise ValueError(f"Restored copy foreign key check failed: {len(fk_violations)} violations")
         finally:
             verify_conn.close()
         
@@ -159,60 +171,43 @@ def prepare_restored_for_resume(restored_path: Path) -> dict:
     conn = sqlite3.connect(str(restored_path))
     try:
         conn.execute("PRAGMA foreign_keys = ON")
-        
+
         changes = {
             "deliveries_to_unknown": 0,
             "campaigns_to_attention": 0,
             "ui_states_cleared": 0,
             "confirmations_cleared": 0,
+            "subscriptions_reset": 0,
         }
-        
-        # Get campaigns that have potentially repeatable deliveries
-        cursor = conn.execute("""
-            SELECT c.id, c.status
-            FROM campaigns c
-            LEFT JOIN deliveries d ON d.campaign_id = c.id
-            WHERE c.status IN ('running', 'scheduled', 'paused')
-            GROUP BY c.id, c.status
+
+        # Potentially repeatable deliveries may exist in ANY campaign state:
+        # a partial/failed campaign restored from an older snapshot can still
+        # contain 'failed' rows that control_campaign(retry) would re-send.
+        result = conn.execute("""
+            UPDATE deliveries
+            SET status = 'unknown', claim_token = NULL, retry_at = NULL,
+                error = 'restored from backup; outcome unknown'
+            WHERE status IN ('pending', 'sending', 'failed')
         """)
-        campaigns = cursor.fetchall()
-        
-        for camp_id, camp_status in campaigns:
-            # Check if campaign has any pending/sending/failed deliveries
-            deliveries_cursor = conn.execute("""
-                SELECT status FROM deliveries WHERE campaign_id = ?
+        changes["deliveries_to_unknown"] = result.rowcount
+
+        # Campaigns that were mid-flight at snapshot time must not auto-resume.
+        cursor = conn.execute("""
+            SELECT id FROM campaigns
+            WHERE status IN ('running', 'scheduled', 'paused')
+        """)
+        campaign_ids = [row[0] for row in cursor.fetchall()]
+        for camp_id in campaign_ids:
+            conn.execute("""
+                UPDATE campaigns SET status = 'attention', revision = revision + 1
+                WHERE id = ?
             """, (camp_id,))
-            delivery_statuses = [row[0] for row in deliveries_cursor.fetchall()]
-            
-            has_pending = any(s in ('pending', 'sending') for s in delivery_statuses)
-            has_failed = any(s == 'failed' for s in delivery_statuses)
-            
-            if has_pending or has_failed:
-                # Convert potentially repeatable deliveries to unknown
-                if has_pending:
-                    result = conn.execute("""
-                        UPDATE deliveries 
-                        SET status = 'unknown', claim_token = NULL, retry_at = NULL,
-                            error = 'restored from backup; outcome unknown'
-                        WHERE campaign_id = ? AND status IN ('pending', 'sending')
-                    """, (camp_id,))
-                    changes["deliveries_to_unknown"] += result.rowcount
-                
-                if has_failed:
-                    result = conn.execute("""
-                        UPDATE deliveries 
-                        SET status = 'unknown', claim_token = NULL, retry_at = NULL,
-                            error = 'restored from backup; outcome unknown'
-                        WHERE campaign_id = ? AND status = 'failed'
-                    """, (camp_id,))
-                    changes["deliveries_to_unknown"] += result.rowcount
-                
-                # Mark campaign as needing attention
-                conn.execute("""
-                    UPDATE campaigns SET status = 'attention', revision = revision + 1
-                    WHERE id = ?
-                """, (camp_id,))
-                changes["campaigns_to_attention"] += 1
+            changes["campaigns_to_attention"] += 1
+
+        # Unsubscriptions after the backup cannot be recovered from the snapshot.
+        # Conservative plan (D3): restore everyone with broadcasts OFF; users opt in.
+        result = conn.execute("UPDATE users SET subscribed = 0 WHERE subscribed = 1")
+        changes["subscriptions_reset"] = result.rowcount
         
         # Clear UI states (panel_id, input, confirmation, history)
         result = conn.execute("""

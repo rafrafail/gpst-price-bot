@@ -62,6 +62,7 @@ TEST_FILES = [
     "tests/test_regressions.py",
     "tests/test_runtime.py",
     "tests/test_storage.py",
+    "tests/test_review_fixes.py",
     "tests/test_profile.py",
     "tests/test_profile_journey.py",
     "tests/test_template_export.py",

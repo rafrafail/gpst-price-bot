@@ -7,6 +7,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
+from bot_template.profile import BotProfile, load_profile_from_env
+
 CLOUD_BOT_API_BASE = "https://api.telegram.org"
 TRANSPORTS = frozenset({"cloud", "self_hosted"})
 
@@ -52,6 +54,30 @@ class Settings:
     webhook_secret: str = field(default="", repr=False)
     webhook_host: str = "127.0.0.1"
     webhook_port: int = 8080
+    # Public profile (loaded from TOML via BOT_PROFILE_PATH)
+    profile: BotProfile = field(default_factory=BotProfile)
+
+    # Billing Engine integration
+    billing_api_url: str | None = None
+    billing_api_key: str = field(default="", repr=False)
+    billing_verify_tls: bool = False
+    billing_application_id: str | None = None
+    billing_webhook_secret: str = field(default="", repr=False)
+    # Map local plan_code -> billing plan_code (may differ)
+    billing_plan_map: dict[str, str] = field(default_factory=dict)
+    billing_plan_version_map: dict[str, str] = field(default_factory=dict)
+    billing_offer_version: str = "1"
+    billing_currency: str = "RUB"
+
+    # Telegram Web App initData validation
+    initdata_max_age_s: int = 86400  # 24h
+
+    # Mini App paywall gate (if true, run-case returns paywall when not pro)
+    miniapp_paywall: bool = False
+
+    @property
+    def bot_username(self) -> str | None:
+        return self.profile.bot_username
 
     @property
     def bot_api_base(self) -> str:
@@ -97,10 +123,49 @@ class Settings:
             raise ValueError("ADMIN_IDS: нужны положительные числовые ID через запятую")
         if os.environ.get("BROADCAST_ENABLED", "1") not in {"0", "1"}:
             raise ValueError("BROADCAST_ENABLED: 0 или 1")
+
+        # Load profile first (can be overridden by explicit env vars)
+        profile = load_profile_from_env()
+
+        # Explicit env vars take priority over profile
+        title = os.environ.get("BOT_TITLE", profile.title)
+        # Help and welcome only from profile (no env overrides for now)
+
+        # Billing Engine settings
+        billing_api_url = os.environ.get("BILLING_API_URL") or None
+        billing_api_key = os.environ.get("BILLING_API_KEY", "")
+        billing_verify_tls = os.environ.get("BILLING_VERIFY_TLS", "0") == "1"
+        billing_application_id = os.environ.get("BILLING_APPLICATION_ID") or None
+        billing_webhook_secret = os.environ.get("BILLING_WEBHOOK_SECRET", "")
+        billing_currency = os.environ.get("BILLING_CURRENCY", "RUB")
+        billing_offer_version = os.environ.get("BILLING_OFFER_VERSION", "1")
+        initdata_max_age_s = int(os.environ.get("INITDATA_MAX_AGE_S", "86400"))
+        miniapp_paywall = os.environ.get("MINIAPP_PAYWALL", "0") == "1"
+
+        # Parse billing_plan_map: "local1=billing1,local2=billing2"
+        billing_plan_map: dict[str, str] = {}
+        raw_plan_map = os.environ.get("BILLING_PLAN_MAP", "")
+        if raw_plan_map:
+            for pair in raw_plan_map.split(","):
+                pair = pair.strip()
+                if "=" in pair:
+                    local, billing = pair.split("=", 1)
+                    billing_plan_map[local.strip()] = billing.strip()
+
+        # Parse billing_plan_version_map: "local1=ver1,local2=ver2"
+        billing_plan_version_map: dict[str, str] = {}
+        raw_version_map = os.environ.get("BILLING_PLAN_VERSION_MAP", "")
+        if raw_version_map:
+            for pair in raw_version_map.split(","):
+                pair = pair.strip()
+                if "=" in pair:
+                    local, ver = pair.split("=", 1)
+                    billing_plan_version_map[local.strip()] = ver.strip()
+
         value = cls(
             token=os.environ.get("BOT_TOKEN", ""),
             admins=frozenset(map(int, parts)),
-            title=os.environ.get("BOT_TITLE", "Мой бот"),
+            title=title,
             database=Path(os.environ.get("DATABASE_PATH", "data/template-v2.sqlite3")),
             timezone=os.environ.get("BOT_TIMEZONE", "Europe/Moscow"),
             broadcasts=os.environ.get("BROADCAST_ENABLED", "1") == "1",
@@ -112,5 +177,17 @@ class Settings:
             webhook_secret=os.environ.get("WEBHOOK_SECRET", ""),
             webhook_host=os.environ.get("WEBHOOK_HOST", "127.0.0.1"),
             webhook_port=int(os.environ.get("WEBHOOK_PORT", "8080")),
+            profile=profile,
+            billing_api_url=billing_api_url,
+            billing_api_key=billing_api_key,
+            billing_verify_tls=billing_verify_tls,
+            billing_application_id=billing_application_id,
+            billing_webhook_secret=billing_webhook_secret,
+            billing_plan_map=billing_plan_map,
+            billing_plan_version_map=billing_plan_version_map,
+            billing_offer_version=billing_offer_version,
+            billing_currency=billing_currency,
+            initdata_max_age_s=initdata_max_age_s,
+            miniapp_paywall=miniapp_paywall,
         )
         return value

@@ -14,6 +14,11 @@ from bot_template.content import prepare_parts, validate_content
 from bot_template.delivery import send_part
 from bot_template.models import Button, Content, Media
 from bot_template.navigation import Navigator, View
+from bot_template.scheduling import (
+    get_schedule_options,
+    parse_exact_schedule,
+    parse_relative_schedule,
+)
 
 log = logging.getLogger(__name__)
 BACK = [("← Назад", "nav:back"), ("🏠 Главное меню", "nav:home")]
@@ -68,21 +73,8 @@ def parse_buttons(text: str) -> list[list[Button]]:
 
 
 def parse_schedule(text: str, tz: str, now: datetime) -> str:
-    try:
-        local = datetime.strptime(text.strip(), "%d.%m.%Y %H:%M")
-    except ValueError:
-        raise ValueError("Нужна дата в формате ДД.ММ.ГГГГ ЧЧ:ММ.") from None
-    zone = ZoneInfo(tz)
-    first = local.replace(tzinfo=zone, fold=0)
-    second = local.replace(tzinfo=zone, fold=1)
-    if first.utcoffset() != second.utcoffset():
-        raise ValueError("Время попало на перевод часов. Выберите другое время.")
-    utc = first.astimezone(timezone.utc)
-    if utc.astimezone(zone).replace(tzinfo=None) != local:
-        raise ValueError("Такого местного времени нет. Выберите другое время.")
-    if utc <= now:
-        raise ValueError("Дата уже прошла. Укажите будущее время или выберите «Сейчас».")
-    return utc.isoformat()
+    """Deprecated alias kept for tests/back-compat; see scheduling.parse_exact_schedule."""
+    return parse_exact_schedule(text, tz, now)
 
 
 class Application:
@@ -103,8 +95,14 @@ class Application:
         return dp
 
     def admin(self, user_id: int) -> None:
-        if not self.settings.broadcasts or user_id not in self.settings.admins:
+        if user_id not in self.settings.admins:
             raise ValueError("Раздел доступен только администраторам.")
+
+    def require_broadcasts(self, user_id: int) -> None:
+        """Admin gate + product gate: broadcasts must be enabled for the bot."""
+        self.admin(user_id)
+        if not self.settings.broadcasts:
+            raise ValueError("Рассылки отключены в конфигурации этого бота.")
 
     async def campaign(self, user_id: int, post_id: int):
         self.admin(user_id)
@@ -117,17 +115,39 @@ class Application:
         ui = await self.store.get_ui(user_id)
         screen = ui["screen"]
         rows = []
+        profile = self.settings.profile
+
         if screen == "home":
-            text = f"{self.settings.title}\n\nВыберите раздел."
-            rows = [[("🧩 Пример раздела", "open:example")],
-                    [("⚙️ Уведомления", "open:preferences"), ("❔ Помощь", "open:help")]]
-            if self.settings.broadcasts and user_id in self.settings.admins:
-                rows.append([("📣 Рассылки", "open:broadcasts")])
+            # settings.title already resolves env BOT_TITLE > profile > default (plan A1)
+            text = f"{self.settings.title}\n\n{profile.welcome}"
+            # Build menu from profile.order
+            for item in profile.menu_order:
+                if item == "about":
+                    # Find the 'about' section
+                    sec = next((s for s in profile.sections if s.id == "about"), None)
+                    if sec:
+                        rows.append([(sec.label, f"open:{sec.id}")])
+                elif item == "preferences":
+                    rows.append([("⚙️ Уведомления", "open:preferences")])
+                elif item == "help":
+                    rows.append([("❔ Помощь", "open:help")])
+                elif item == "broadcasts" and self.settings.broadcasts and user_id in self.settings.admins:
+                    rows.append([("📣 Рассылки", "open:broadcasts")])
+                elif item == "admin" and user_id in self.settings.admins:
+                    rows.append([("🔧 Администрирование", "open:admin")])
+                elif item == "example" and profile.example.enabled:
+                    rows.append([("🧩 Пример раздела", "open:example")])
+                # Custom sections from profile
+                elif item not in {"about", "preferences", "help", "broadcasts", "example"}:
+                    sec = next((s for s in profile.sections if s.id == item), None)
+                    if sec:
+                        rows.append([(sec.label, f"open:{sec.id}")])
+            # Support URL if configured
+            if profile.support_url:
+                rows.append([("💬 Поддержка", profile.support_url)])
+
         elif screen == "help":
-            text = ("❔ Помощь\n\nМеню переключается в одном сообщении.\n"
-                    "«Назад» возвращает на прошлый экран. «Главное меню» не удаляет черновики.\n"
-                    "/menu — открыть меню\n/cancel — отменить текущий ввод\n"
-                    "Готовые результаты и предпросмотры остаются в переписке.")
+            text = profile.help
         elif screen == "preferences":
             subscribed = await self.store.is_subscribed(user_id)
             text = ("⚙️ Уведомления\n\nМассовые рассылки: "
@@ -136,6 +156,10 @@ class Application:
             rows = [[("Выключить рассылки" if subscribed else "Включить рассылки",
                       "subscribe:0" if subscribed else "subscribe:1")]]
         elif screen.startswith("example"):
+            if not profile.example.enabled:
+                await self.nav.home(user_id)
+                await self.render(user_id, "Пример раздела отключён. Открыто главное меню.")
+                return
             note = ui.get("note", "Пока нет заметки.")
             if screen == "example":
                 text = "🧩 Пример независимого раздела\n\nЗаметка сохраняется после перезапуска."
@@ -149,21 +173,48 @@ class Application:
                         "Навигация не уничтожает данные.\n"
                         "Результат живёт отдельно от меню.\n"
                         "Для добавления раздела не нужен модуль рассылок или AI.")
+        # Custom profile sections
+        elif screen in {s.id for s in profile.sections}:
+            sec = next(s for s in profile.sections if s.id == screen)
+            text = f"{sec.label}\n\n{sec.text}"
+            # No extra actions for static sections
+        elif screen == "admin" and user_id in self.settings.admins:
+            # Admin overview: one consistent read transaction (plan D1)
+            ov = await self.store.admin_overview(user_id)
+            text = (f"🔧 Администрирование\n\n"
+                    f"👥 Пользователи:\n"
+                    f"  Всего: {ov['total_users']}\n"
+                    f"  Подписаны: {ov['subscribed_users']}\n"
+                    f"  Доступны: {ov['reachable_users']}\n\n"
+                    f"📣 Ваши рассылки:\n"
+                    f"  Запланировано: {ov['scheduled']}\n"
+                    f"  В работе: {ov['running']}\n"
+                    f"  На паузе: {ov['paused']}\n"
+                    f"  Нуждаются в внимании: {ov['attention']}")
+            rows = []
+            if ov["scheduled"]:
+                rows.append([("📋 Запланированные", "open:list:scheduled:0")])
+            if ov["running"] or ov["paused"]:
+                rows.append([("⚙️ В работе", "open:list:active:0")])
+            if ov["attention"]:
+                rows.append([("⚠️ Нуждаются в внимании", "open:list:attention:0")])
+            rows.append([("📊 История", "open:list:history:0")])
         elif screen == "broadcasts":
-            self.admin(user_id)
+            self.require_broadcasts(user_id)
             text = "📣 Рассылки\n\nСоздайте пост или продолжите сохранённый."
             rows = [[("＋ Создать рассылку", "new")],
                     [("Черновики", "open:list:draft:0"), ("Запланированные", "open:list:scheduled:0")],
                     [("В работе", "open:list:active:0"), ("История", "open:list:history:0")]]
         elif screen.startswith("list:"):
-            self.admin(user_id)
+            self.require_broadcasts(user_id)
             _, group, page_text = screen.split(":")
             page = max(0, int(page_text))
             states = {"draft": ["draft"], "scheduled": ["scheduled"],
                       "active": ["running", "paused"],
+                      "attention": ["attention"],
                       "history": ["completed", "partial", "failed", "stopped", "attention"]}[group]
             posts = await self.store.list_campaigns(user_id, statuses=states)
-            text = f"📣 {dict(draft='Черновики', scheduled='Запланированные', active='В работе', history='История')[group]}"
+            text = f"📣 {dict(draft='Черновики', scheduled='Запланированные', active='В работе', attention='Нуждаются в внимании', history='История')[group]}"
             if not posts:
                 text += "\n\nЗдесь пока пусто. Можно создать новую рассылку."
                 rows = [[("＋ Создать", "new")]]
@@ -172,7 +223,10 @@ class Application:
                 page = min(page, pages - 1)
                 text += f"\n\nСтраница {page + 1} из {pages}"
                 for post in posts[page * 5:page * 5 + 5]:
-                    title = post.content.text.replace("\n", " ")[:30] or "Пост без текста"
+                    if post.label:
+                        title = post.label
+                    else:
+                        title = post.content.text.replace("\n", " ")[:30] or "Пост без текста"
                     rows.append([(f"#{post.id} · {title}", f"open:campaign:{post.id}")])
                 pager = []
                 if page:
@@ -188,11 +242,24 @@ class Application:
             if mode == "audience":
                 text = "👥 Кто получит рассылку?"
                 rows = [[("Все подписчики", f"choose:all:{key}")],
-                        [("Только я (проверка)", f"choose:self:{key}")]]
+                        [("Только я (проверка)", f"choose:self:{key}")],
+                        [("Новые за 7 дней", f"choose:new_7d:{key}")],
+                        [("Активные за 7 дней", f"choose:active_7d:{key}")],
+                        [("Активные за 30 дней", f"choose:active_30d:{key}")]]
             elif mode == "when":
-                text = f"🕒 Время отправки · {self.settings.timezone}"
-                rows = [[("Сейчас", f"schedule:now:{key}")],
-                        [("Выбрать дату и время", f"schedule:later:{key}")]]
+                text = f"🕒 Время отправки · {self.settings.timezone}\n\nВыберите вариант или введите свою дату:"
+                options = get_schedule_options(self.settings.timezone, datetime.now(timezone.utc))
+                rows = []
+                for opt in options:
+                    if opt["value"] == "custom":
+                        rows.append([(opt["label"], f"schedule:custom:{key}")])
+                    elif opt["value"] == "now":
+                        rows.append([(opt["label"], f"schedule:now:{key}")])
+                    else:
+                        # For presets, encode the value to avoid colon conflicts
+                        encoded_value = opt["value"].replace(" ", "_").replace(":", "-")
+                        post_id, revision = key.split(":")
+                        rows.append([(opt["label"], f"schedule:preset:{encoded_value}:{post_id}:{revision}")])
             else:
                 action = "stop" if mode == "stopask" else "retry"
                 text = ("Остановить оставшуюся отправку? Уже отправленные сообщения не отзываются."
@@ -201,9 +268,17 @@ class Application:
         elif screen.startswith(("campaign:", "confirm:")):
             post = await self.campaign(user_id, int(screen.split(":")[1]))
             audience = {None: "не выбраны", "all": "все подписчики", "self": "только я"}[post.audience]
+            if post.audience_filter:
+                filter_labels = {"new_7d": "новые за 7 дней", "active_7d": "активные за 7 дней", "active_30d": "активные за 30 дней"}
+                audience += f" · {filter_labels.get(post.audience_filter, post.audience_filter)}"
             when = (datetime.fromisoformat(post.scheduled_at).astimezone(ZoneInfo(self.settings.timezone))
                     .strftime("%d.%m.%Y %H:%M") if post.scheduled_at else "сейчас")
+            
+            # Show label if set
+            label_line = f"Имя: {post.label}\n" if post.label else ""
+            
             text = (f"📣 Рассылка #{post.id} · {LABELS[post.status]}\n\n"
+                    f"{label_line}"
                     f"Текст: {'добавлен' if post.content.text else 'нет'}\n"
                     f"Медиа: {len(post.content.media)}\n"
                     f"Кнопок: {sum(len(row) for row in post.content.buttons)}\n"
@@ -220,9 +295,9 @@ class Application:
                 rows = [[("✅ Подтвердить запуск", f"launch:{key}")]]
             elif post.status == "draft":
                 rows = [[("✏️ Текст", f"edit:text:{key}"), ("🖼 Медиа", f"edit:media:{key}")],
-                        [("🔗 Кнопки", f"edit:buttons:{key}"), ("👥 Получатели", f"audience:{key}")],
-                        [("🕒 Когда", f"when:{key}"), ("👁 Предпросмотр", f"preview:{key}")],
-                        [("🧪 Отправить себе", f"test:{key}")],
+                        [("🔗 Кнопки", f"edit:buttons:{key}"), ("🏷 Имя", f"edit:label:{key}")],
+                        [("👥 Получатели", f"audience:{key}"), ("🕒 Когда", f"when:{key}")],
+                        [("👁 Предпросмотр", f"preview:{key}"), ("🧪 Отправить себе", f"test:{key}")],
                         [("Продолжить к отправке", f"confirm:{key}")]]
             else:
                 counts = await self.store.campaign_counts(post.id)
@@ -300,8 +375,11 @@ class Application:
                 await self.nav.home(uid)
             elif command == "/help":
                 await self.nav.open(uid, "help")
-            elif command in {"/admin", "/broadcast"}:
+            elif command in {"/admin"}:
                 self.admin(uid)
+                await self.nav.open(uid, "admin")
+            elif command == "/broadcast":
+                self.require_broadcasts(uid)
                 await self.nav.open(uid, "broadcasts")
             elif command == "/cancel":
                 ui = await self.store.get_ui(uid)
@@ -328,7 +406,15 @@ class Application:
                     if kind == "buttons":
                         content = replace(post.content, buttons=parse_buttons(text))
                     elif kind == "schedule":
-                        changes["scheduled_at"] = parse_schedule(text, self.settings.timezone, datetime.now(timezone.utc))
+                        changes["scheduled_at"] = parse_relative_schedule(text, self.settings.timezone, datetime.now(timezone.utc))
+                        content = post.content
+                    elif kind == "label":
+                        if text.strip() == "0":
+                            changes["label"] = ""
+                        else:
+                            if len(text) > 80:
+                                raise ValueError("Имя не длиннее 80 символов.")
+                            changes["label"] = text.strip()
                         content = post.content
                     elif kind == "media" and text.strip() == "0":
                         content = replace(post.content, media=[])
@@ -369,7 +455,18 @@ class Application:
             ui = await self.store.get_ui(uid)
             if data.startswith("go:"):
                 target = data[3:]
-                if target not in {"home", "help", "example", "preferences"}:
+                profile = self.settings.profile
+                allowed = {"home", "help", "preferences"}
+                if profile.example.enabled:
+                    allowed.add("example")
+                # Allow profile sections
+                allowed.update(s.id for s in profile.sections)
+                if target not in allowed:
+                    if target == "example" and not profile.example.enabled:
+                        await callback.answer("Пример раздела отключён.", show_alert=True)
+                        await self.nav.home(uid)
+                        await self.render(uid, "Пример раздела отключён. Открыто главное меню.")
+                        return
                     await callback.answer("Неизвестное действие.", show_alert=True)
                     return
                 await callback.answer()
@@ -403,17 +500,31 @@ class Application:
             await self.store.save_ui(uid, ui)
         elif data.startswith("open:"):
             screen = data[5:]
+            profile = self.settings.profile
             if screen == "broadcasts":
-                self.admin(uid)
+                self.require_broadcasts(uid)
             elif re.fullmatch(r"campaign:\d+", screen):
                 await self.campaign(uid, int(screen.split(":")[1]))
-            elif re.fullmatch(r"list:(draft|scheduled|active|history):\d{1,6}", screen):
-                self.admin(uid)
-            elif screen not in {"home", "help", "preferences", "example", "example:note", "example:rules"}:
-                raise ValueError("Неизвестный раздел.")
+            elif re.fullmatch(r"list:(draft|scheduled|active|attention|history):\d{1,6}", screen):
+                self.require_broadcasts(uid)
+            elif screen == "example":
+                if not profile.example.enabled:
+                    await self.nav.home(uid)
+                    await self.render(uid, "Пример раздела отключён. Открыто главное меню.")
+                    return
+            else:
+                allowed = {"home", "help", "preferences", "example", "example:note", "example:rules"}
+                if not profile.example.enabled:
+                    allowed.discard("example")
+                    allowed.discard("example:note")
+                    allowed.discard("example:rules")
+                # Allow profile sections
+                allowed.update(s.id for s in profile.sections)
+                if screen not in allowed:
+                    raise ValueError("Неизвестный раздел.")
             await self.nav.open(uid, screen)
         elif data.startswith("page:"):
-            self.admin(uid)
+            self.require_broadcasts(uid)
             if not re.fullmatch(r"page:(draft|scheduled|active|history):\d{1,6}", data):
                 raise ValueError("Неизвестная страница.")
             await self.nav.open(uid, "list:" + data[5:], remember=False)
@@ -422,7 +533,7 @@ class Application:
         elif data == "note:edit":
             await self.begin_input(uid, "note", "📝 Пришлите новую заметку (до 1500 символов).")
         elif data == "new":
-            self.admin(uid)
+            self.require_broadcasts(uid)
             ui = await self.store.get_ui(uid)
             if ui["screen"] != "broadcasts" and not ui["screen"].startswith("list:"):
                 raise ValueError("Откройте список рассылок для создания нового поста.")
@@ -431,14 +542,29 @@ class Application:
             await self.begin_input(uid, "text", "📣 Пришлите текст или готовый пост с фото/видео.",
                                    id=post.id, revision=post.revision)
         else:
-            self.admin(uid)
+            self.require_broadcasts(uid)
             pieces = data.split(":")
             action = pieces[0]
             if action == "edit":
                 kind, post_id, revision = pieces[1], int(pieces[2]), int(pieces[3])
-            elif action in {"control", "choose", "schedule"}:
+            elif action in {"control", "choose"}:
                 kind, post_id = pieces[1], int(pieces[2])
                 revision = int(pieces[3]) if len(pieces) > 3 else None
+            elif action == "schedule":
+                # schedule:now:post_id:revision OR schedule:custom:post_id:revision OR schedule:preset:encoded_value:post_id:revision
+                sub_action = pieces[1]
+                if sub_action in {"now", "custom"}:
+                    kind = sub_action
+                    post_id = int(pieces[2])
+                    revision = int(pieces[3]) if len(pieces) > 3 else None
+                elif sub_action == "preset" and len(pieces) >= 5:
+                    encoded_value = pieces[2]
+                    decoded_value = encoded_value.replace("_", " ").replace("-", ":")
+                    kind = f"preset:{decoded_value}"
+                    post_id = int(pieces[3])
+                    revision = int(pieces[4])
+                else:
+                    raise ValueError("Неизвестный под-действие расписания")
             else:
                 post_id = int(pieces[1])
                 revision = int(pieces[2]) if len(pieces) > 2 else None
@@ -452,12 +578,21 @@ class Application:
                 prompts = {"text": "✏️ Пришлите новый текст с обычным форматированием Telegram.",
                            "media": "🖼 Пришлите фото, видео или альбом. 0 — убрать вложения.",
                            "buttons": "🔗 Каждая строка: Название | https://example.com\n"
-                           "Кнопки в одном ряду разделите ;\nПереходы: @home, @help, @example, @preferences.\n0 — убрать кнопки."}
+                           "Кнопки в одном ряду разделите ;\nПереходы: @home, @help, @example, @preferences.\n0 — убрать кнопки.",
+                           "label": "🏷 Пришлите внутреннее имя рассылки (до 80 символов). 0 — убрать имя."}
                 await self.begin_input(uid, kind, prompts[kind], id=post.id, revision=post.revision)
             elif action == "audience":
                 await self.nav.open(uid, f"audience:{post.id}")
             elif action == "choose":
-                await self.store.save_campaign(post.id, uid, expected_revision=post.revision, audience=kind)
+                # kind can be audience (all/self) or audience_filter (new_7d/active_7d/active_30d)
+                if kind in ("new_7d", "active_7d", "active_30d"):
+                    if post.audience != "all":
+                        raise ValueError("Фильтр применяется только к группе «Все подписчики».")
+                    await self.store.save_campaign(post.id, uid, expected_revision=post.revision, audience_filter=kind)
+                else:
+                    # all/self resets any stale filter so confirmation matches launch
+                    await self.store.save_campaign(post.id, uid, expected_revision=post.revision,
+                                                   audience=kind, audience_filter=None)
                 await self.nav.back(uid)
             elif action == "when":
                 await self.nav.open(uid, f"when:{post.id}")
@@ -465,10 +600,15 @@ class Application:
                 if kind == "now":
                     await self.store.save_campaign(post.id, uid, expected_revision=post.revision, clear_schedule=True)
                     await self.nav.back(uid)
-                elif kind == "later":
+                elif kind == "custom":
                     await self.nav.back(uid)
-                    await self.begin_input(uid, "schedule", f"🕒 Пришлите дату: ДД.ММ.ГГГГ ЧЧ:ММ\nЧасовой пояс: {self.settings.timezone}.",
+                    await self.begin_input(uid, "schedule", f"🕒 Введите дату: ДД.ММ.ГГГГ ЧЧ:ММ\nЧасовой пояс: {self.settings.timezone}.",
                                            id=post.id, revision=post.revision)
+                elif kind.startswith("preset:today ") or kind.startswith("preset:tomorrow "):
+                    # Preset option: preset:today 14:00 or preset:tomorrow 14:00
+                    scheduled_at = parse_relative_schedule(kind[7:], self.settings.timezone, datetime.now(timezone.utc))
+                    await self.store.save_campaign(post.id, uid, expected_revision=post.revision, scheduled_at=scheduled_at)
+                    await self.nav.back(uid)
                 else:
                     raise ValueError("Неизвестный способ отправки.")
             elif action in {"preview", "test"}:
@@ -481,7 +621,7 @@ class Application:
                 validate_content(post.content)
                 if post.audience is None:
                     raise ValueError("Сначала выберите получателей.")
-                recipients = await self.store.preview_audience(uid, post.audience)
+                recipients = await self.store.preview_audience(uid, post.audience, post.audience_filter)
                 if not recipients:
                     raise ValueError("Нет доступных подписчиков. Проверьте настройки уведомлений.")
                 await self.nav.open(uid, f"confirm:{post.id}")

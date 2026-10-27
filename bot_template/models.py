@@ -42,9 +42,11 @@ class Campaign:
     content: Content
     status: str
     audience: str | None
+    audience_filter: str | None
     scheduled_at: str | None
     revision: int
     created_at: str
+    label: str = ""
 
 
 @dataclass(frozen=True)

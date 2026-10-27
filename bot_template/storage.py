@@ -12,7 +12,7 @@ import os
 import sqlite3
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 from uuid import uuid4
@@ -46,9 +46,11 @@ CREATE TABLE IF NOT EXISTS campaigns (
         'partial', 'failed', 'attention'
     )),
     audience TEXT CHECK (audience IN ('all', 'self')),
+    audience_filter TEXT CHECK (audience_filter IN ('new_7d', 'active_7d', 'active_30d')),
     scheduled_at TEXT,
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS campaigns_owner ON campaigns(owner_id, id);
 CREATE TABLE IF NOT EXISTS deliveries (
@@ -75,6 +77,22 @@ CREATE TABLE IF NOT EXISTS ui_state (
     user_id INTEGER PRIMARY KEY CHECK (user_id > 0),
     data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS payments (
+    uid TEXT PRIMARY KEY,
+    tg_user_id INTEGER NOT NULL CHECK (tg_user_id > 0),
+    plan_code TEXT NOT NULL,
+    plan_period TEXT,
+    plan_days INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'succeeded', 'failed', 'expired', 'refunded')),
+    provider TEXT NOT NULL DEFAULT 'card' CHECK (provider IN ('card', 'manual')),
+    provider_ref TEXT,
+    subscription_id TEXT,
+    expires_at TEXT,
+    email TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS payments_user ON payments(tg_user_id, created_at);
 """
 
 
@@ -118,12 +136,21 @@ def _audience(value: str | None) -> str:
     return value
 
 
+def _audience_filter(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in ("new_7d", "active_7d", "active_30d"):
+        raise ValueError("audience_filter must be new_7d, active_7d, or active_30d")
+    return value
+
+
 def _campaign(row: sqlite3.Row) -> Campaign:
     return Campaign(
         id=row["id"], owner_id=row["owner_id"],
         content=Content.from_dict(json.loads(row["content"])), status=row["status"],
-        audience=row["audience"], scheduled_at=row["scheduled_at"],
-        revision=row["revision"], created_at=row["created_at"],
+        audience=row["audience"], audience_filter=row["audience_filter"] if "audience_filter" in row.keys() else None,
+        scheduled_at=row["scheduled_at"], revision=row["revision"],
+        created_at=row["created_at"], label=row["label"] if "label" in row.keys() else "",
     )
 
 
@@ -195,14 +222,27 @@ class Store:
                         time.sleep(0.02)
                 connection.execute("BEGIN IMMEDIATE")
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1):
+                if version not in (0, 1, 2, 3):
                     raise ValueError("unsupported storage schema version")
                 # executescript implicitly commits, so execute the fixed DDL
                 # statements separately to keep initialization transactional.
                 for statement in _SCHEMA.split(";"):
                     if statement.strip():
                         connection.execute(statement)
-                connection.execute("PRAGMA user_version = 1")
+                if version < 3:
+                    if version == 1:
+                        # v1 -> v2: campaigns.label (internal name, plan B1)
+                        label_cols = {row["name"] for row in connection.execute("PRAGMA table_info(campaigns)").fetchall()}
+                        if "label" not in label_cols:
+                            connection.execute("ALTER TABLE campaigns ADD COLUMN label TEXT NOT NULL DEFAULT ''")
+                    # v2 -> v3: campaigns.audience_filter (plan C1)
+                    camp_cols = {row["name"] for row in connection.execute("PRAGMA table_info(campaigns)").fetchall()}
+                    if "audience_filter" not in camp_cols:
+                        connection.execute(
+                            "ALTER TABLE campaigns ADD COLUMN audience_filter TEXT "
+                            "CHECK (audience_filter IN ('new_7d', 'active_7d', 'active_30d'))"
+                        )
+                connection.execute("PRAGMA user_version = 3")
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -225,12 +265,28 @@ class Store:
         return row
 
     @staticmethod
-    def _eligible(connection: sqlite3.Connection, owner_id: int, audience: str) -> list[int]:
+    def _eligible(connection: sqlite3.Connection, owner_id: int, audience: str, audience_filter: str | None = None) -> list[int]:
         query = "SELECT user_id FROM users WHERE subscribed = 1 AND reachable = 1"
-        params: tuple[int, ...] = ()
+        params: list[Any] = []
         if audience == "self":
             query += " AND user_id = ?"
-            params = (owner_id,)
+            params.append(owner_id)
+        
+        # Apply audience filter: bounded window [now - N days, now]
+        now_dt = datetime.now(timezone.utc)
+        if audience_filter == "new_7d":
+            cutoff = _utc(now_dt - timedelta(days=7))
+            query += " AND first_seen >= ? AND first_seen <= ?"
+            params += (cutoff, _utc(now_dt))
+        elif audience_filter == "active_7d":
+            cutoff = _utc(now_dt - timedelta(days=7))
+            query += " AND last_seen >= ? AND last_seen <= ?"
+            params += (cutoff, _utc(now_dt))
+        elif audience_filter == "active_30d":
+            cutoff = _utc(now_dt - timedelta(days=30))
+            query += " AND last_seen >= ? AND last_seen <= ?"
+            params += (cutoff, _utc(now_dt))
+        
         return [row[0] for row in connection.execute(query + " ORDER BY user_id", params)]
 
     async def register_user(self, user_id: int, username: str | None = None,
@@ -272,10 +328,12 @@ class Store:
 
         return await self._run(get)
 
-    async def preview_audience(self, owner_id: int, audience: str) -> list[int]:
+    async def preview_audience(self, owner_id: int, audience: str, audience_filter: str | None = None) -> list[int]:
         _positive(owner_id, "owner_id")
         _audience(audience)
-        return await self._run(lambda connection: self._eligible(connection, owner_id, audience))
+        if audience_filter is not None:
+            _audience_filter(audience_filter)
+        return await self._run(lambda connection: self._eligible(connection, owner_id, audience, audience_filter))
 
     async def create_campaign(self, owner_id: int) -> Campaign:
         _positive(owner_id, "owner_id")
@@ -330,7 +388,9 @@ class Store:
 
     async def save_campaign(self, campaign_id: int, owner_id: int, *, expected_revision: int,
                             content: Content | None = None, audience: str | None = None,
-                            scheduled_at: str | None = None, clear_schedule: bool = False) -> Campaign:
+                            audience_filter: str | None = None,
+                            scheduled_at: str | None = None, clear_schedule: bool = False,
+                            label: str | None = None) -> Campaign:
         _positive(campaign_id, "campaign_id")
         _positive(owner_id, "owner_id")
         _nonnegative(expected_revision, "expected_revision")
@@ -339,8 +399,15 @@ class Store:
         content_json = _json(content.to_dict()) if content is not None else None
         if audience is not None:
             _audience(audience)
+        if audience_filter is not None:
+            _audience_filter(audience_filter)
         if type(clear_schedule) is not bool or (clear_schedule and scheduled_at is not None):
             raise ValueError("conflicting or invalid schedule arguments")
+        if label is not None:
+            if not isinstance(label, str):
+                raise ValueError("label must be a string")
+            if len(label) > 80:
+                raise ValueError("label не длиннее 80 символов")
         schedule = _schedule(scheduled_at) if scheduled_at is not None else None
 
         def save(connection: sqlite3.Connection) -> Campaign:
@@ -348,11 +415,13 @@ class Store:
             if row["status"] != "draft" or row["revision"] != expected_revision:
                 raise ValueError("campaign is not a current draft")
             connection.execute(
-                """UPDATE campaigns SET content = ?, audience = ?, scheduled_at = ?,
-                   revision = revision + 1 WHERE id = ?""",
+                """UPDATE campaigns SET content = ?, audience = ?, audience_filter = ?, scheduled_at = ?,
+                   revision = revision + 1, label = ? WHERE id = ?""",
                 (content_json if content_json is not None else row["content"],
                  audience if audience is not None else row["audience"],
+                 audience_filter if audience_filter is not None else row["audience_filter"],
                  None if clear_schedule else schedule if schedule is not None else row["scheduled_at"],
+                 label if label is not None else row["label"],
                  campaign_id),
             )
             return _campaign(self._owned(connection, campaign_id, owner_id))
@@ -387,7 +456,7 @@ class Store:
             audience = _audience(campaign.audience)
             if campaign.scheduled_at is not None and campaign.scheduled_at <= timestamp:
                 raise ValueError("scheduled_at must be in the future")
-            recipients = self._eligible(connection, owner_id, audience)
+            recipients = self._eligible(connection, owner_id, audience, campaign.audience_filter)
             if expected_recipients is not None and recipients != expected_recipients:
                 raise ValueError("audience changed; confirmation required")
             if not recipients:
@@ -411,9 +480,12 @@ class Store:
 
         def duplicate(connection: sqlite3.Connection) -> Campaign:
             row = self._owned(connection, campaign_id, owner_id)
+            original_label = row["label"] if "label" in row.keys() else ""
+            original_audience_filter = row["audience_filter"] if "audience_filter" in row.keys() else None
+            copy_label = f"{original_label} (копия)" if original_label else "Копия"
             cursor = connection.execute(
-                """INSERT INTO campaigns(owner_id, content, status, audience, created_at)
-                   VALUES (?, ?, 'draft', ?, ?)""", (owner_id, row["content"], row["audience"], now),
+                """INSERT INTO campaigns(owner_id, content, status, audience, audience_filter, created_at, label)
+                   VALUES (?, ?, 'draft', ?, ?, ?, ?)""", (owner_id, row["content"], row["audience"], original_audience_filter, now, copy_label),
             )
             assert cursor.lastrowid is not None
             return _campaign(self._owned(connection, cursor.lastrowid, owner_id))
@@ -589,6 +661,42 @@ class Store:
 
         return await self._run(count)
 
+    async def count_users(self) -> int:
+        return await self._run(lambda connection: connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+
+    async def count_subscribed_users(self) -> int:
+        return await self._run(lambda connection: connection.execute("SELECT COUNT(*) FROM users WHERE subscribed = 1").fetchone()[0])
+
+    async def count_reachable_users(self) -> int:
+        return await self._run(lambda connection: connection.execute("SELECT COUNT(*) FROM users WHERE reachable = 1").fetchone()[0])
+
+    async def admin_overview(self, owner_id: int) -> dict:
+        """One consistent read transaction for the whole admin overview (plan D1)."""
+        _positive(owner_id, "owner_id")
+
+        def overview(connection: sqlite3.Connection) -> dict:
+            totals = connection.execute(
+                "SELECT COUNT(*), COALESCE(SUM(subscribed = 1), 0), COALESCE(SUM(reachable = 1), 0) FROM users"
+            ).fetchone()
+            status_rows = connection.execute(
+                "SELECT status, COUNT(*) FROM campaigns WHERE owner_id = ? GROUP BY status",
+                (owner_id,),
+            ).fetchall()
+            by_status = {row[0]: row[1] for row in status_rows}
+            return {
+                "total_users": totals[0],
+                "subscribed_users": totals[1],
+                "reachable_users": totals[2],
+                "scheduled": by_status.get("scheduled", 0),
+                "running": by_status.get("running", 0),
+                "paused": by_status.get("paused", 0),
+                "attention": by_status.get("attention", 0),
+                "history": sum(by_status.get(s, 0) for s in
+                               ("completed", "partial", "failed", "stopped")),
+            }
+
+        return await self._run(overview)
+
     async def claim_album(self, user_id: int, group_id: str) -> bool:
         """Durable tombstone: a late/replayed group may never bind to a new input."""
         _positive(user_id, "user_id")
@@ -619,4 +727,67 @@ class Store:
         await self._run(lambda connection: connection.execute(
             "INSERT INTO ui_state(user_id, data) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET data = excluded.data",
             (user_id, serialized),
+        ).rowcount, write=True)
+
+    # ── payments (webapp) ────────────────────────────────────────────────
+
+    async def create_payment(self, *, uid: str, tg_user_id: int, plan_code: str,
+                             plan_period: str | None, plan_days: int | None,
+                             provider: str, email: str | None) -> None:
+        _positive(tg_user_id, "tg_user_id")
+        if not uid or not isinstance(uid, str):
+            raise ValueError("payment uid required")
+        if not plan_code:
+            raise ValueError("plan_code required")
+        if provider not in ("card", "manual"):
+            raise ValueError("provider must be card or manual")
+        now = _utc(datetime.now(timezone.utc))
+        await self._run(lambda connection: connection.execute(
+            """INSERT INTO payments(uid, tg_user_id, plan_code, plan_period, plan_days,
+                  status, provider, email, created_at, updated_at)
+               VALUES(?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)""",
+            (uid, tg_user_id, plan_code, plan_period, plan_days, provider, email, now, now),
+        ).rowcount, write=True)
+
+    async def get_payment(self, uid: str) -> dict | None:
+        if not uid:
+            return None
+        return await self._run(lambda connection: connection.execute(
+            "SELECT * FROM payments WHERE uid = ?", (uid,)
+        ).fetchone())
+
+    async def get_payment_by_provider_ref(self, provider_ref: str) -> dict | None:
+        if not provider_ref:
+            return None
+        return await self._run(lambda connection: connection.execute(
+            "SELECT * FROM payments WHERE provider_ref = ?", (provider_ref,)
+        ).fetchone())
+
+    async def set_payment_provider_ref(self, uid: str, provider_ref: str,
+                                        pay_url: str | None = None,
+                                        subscription_id: str | None = None,
+                                        expires_at: str | None = None) -> None:
+        now = _utc(datetime.now(timezone.utc))
+        await self._run(lambda connection: connection.execute(
+            """UPDATE payments SET provider_ref = ?, subscription_id = ?, expires_at = ?,
+                  updated_at = ? WHERE uid = ?""",
+            (provider_ref, subscription_id, expires_at, now, uid),
+        ).rowcount, write=True)
+
+    async def set_payment_status(self, uid: str, status: str) -> None:
+        if status not in ("pending", "succeeded", "failed", "expired", "refunded"):
+            raise ValueError("invalid payment status")
+        now = _utc(datetime.now(timezone.utc))
+        await self._run(lambda connection: connection.execute(
+            "UPDATE payments SET status = ?, updated_at = ? WHERE uid = ?",
+            (status, now, uid),
+        ).rowcount, write=True)
+
+    async def expire_pending_payments(self, ttl_hours: int) -> int:
+        if ttl_hours <= 0:
+            return 0
+        cutoff = _utc(datetime.now(timezone.utc) - timedelta(hours=ttl_hours))
+        return await self._run(lambda connection: connection.execute(
+            "UPDATE payments SET status = 'expired', updated_at = ? WHERE status = 'pending' AND created_at < ?",
+            (_utc(datetime.now(timezone.utc)), cutoff),
         ).rowcount, write=True)

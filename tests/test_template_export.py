@@ -19,6 +19,20 @@ from scripts.export_template import (
 )
 
 
+def _in_git_checkout() -> bool:
+    """Gate sandboxes run tests from a .git-less copy; exporter needs real git."""
+    try:
+        return (get_repo_root() / ".git").exists()
+    except Exception:
+        return False
+
+
+requires_git_checkout = pytest.mark.skipif(
+    not _in_git_checkout(), reason="exporter tests need a real git checkout (with .git)"
+)
+
+
+@requires_git_checkout
 def test_get_repo_root() -> None:
     """get_repo_root returns the git repository root."""
     root = get_repo_root()
@@ -26,6 +40,7 @@ def test_get_repo_root() -> None:
     assert (root / ".git").exists()
 
 
+@requires_git_checkout
 def test_get_commit_sha() -> None:
     """get_commit_sha returns a valid 40-hex SHA."""
     root = get_repo_root()
@@ -49,6 +64,7 @@ def test_file_sha256() -> None:
         path.unlink()
 
 
+@requires_git_checkout
 def test_template_files_exist() -> None:
     """All TEMPLATE_FILES exist in the repository."""
     root = get_repo_root()
@@ -58,6 +74,7 @@ def test_template_files_exist() -> None:
         assert full.is_file(), f"Not a file: {rel_path}"
 
 
+@requires_git_checkout
 def test_test_files_exist() -> None:
     """All TEST_FILES exist in the repository."""
     root = get_repo_root()
@@ -67,6 +84,7 @@ def test_test_files_exist() -> None:
         assert full.is_file(), f"Not a file: {rel_path}"
 
 
+@requires_git_checkout
 def test_export_creates_valid_manifest(tmp_path) -> None:
     """Export creates valid manifest with correct hashes."""
     root = get_repo_root()
@@ -94,6 +112,7 @@ def test_export_creates_valid_manifest(tmp_path) -> None:
         assert actual_hash == file_info["sha256"], f"Hash mismatch for {file_info['path']}"
 
 
+@requires_git_checkout
 def test_export_excludes_git_and_data(tmp_path) -> None:
     """Export does not include .git, .env, databases, or working directories."""
     root = get_repo_root()
@@ -113,6 +132,7 @@ def test_export_excludes_git_and_data(tmp_path) -> None:
     assert not (export_path / ".ruff_cache").exists()
 
 
+@requires_git_checkout
 def test_export_includes_env_example(tmp_path) -> None:
     """Export includes a fresh .env.example without credentials."""
     root = get_repo_root()
@@ -133,6 +153,7 @@ def test_export_includes_env_example(tmp_path) -> None:
     assert "BOT_PROFILE_PATH" in content
 
 
+@requires_git_checkout
 def test_verify_export_passes(tmp_path) -> None:
     """verify_export returns True for valid export."""
     root = get_repo_root()
@@ -142,6 +163,7 @@ def test_verify_export_passes(tmp_path) -> None:
     assert verify_export(export_path) is True
 
 
+@requires_git_checkout
 def test_verify_export_fails_on_missing_file(tmp_path) -> None:
     """verify_export fails when a manifest file is missing."""
     root = get_repo_root()
@@ -156,6 +178,7 @@ def test_verify_export_fails_on_missing_file(tmp_path) -> None:
         verify_export(export_path)
 
 
+@requires_git_checkout
 def test_verify_export_fails_on_hash_mismatch(tmp_path) -> None:
     """verify_export fails when file content doesn't match manifest."""
     root = get_repo_root()
@@ -171,6 +194,7 @@ def test_verify_export_fails_on_hash_mismatch(tmp_path) -> None:
         verify_export(export_path)
 
 
+@requires_git_checkout
 def test_export_script_cli(tmp_path) -> None:
     """export_template.py CLI works correctly."""
     root = get_repo_root()
@@ -187,6 +211,7 @@ def test_export_script_cli(tmp_path) -> None:
     assert "Export verified successfully!" in result.stdout
 
 
+@requires_git_checkout
 def test_export_without_commit_sha_uses_head(tmp_path) -> None:
     """Export without explicit commit SHA uses current HEAD."""
     root = get_repo_root()
@@ -202,6 +227,7 @@ def test_export_without_commit_sha_uses_head(tmp_path) -> None:
     assert f"Exporting template from commit {commit_sha}" in result.stdout
 
 
+@requires_git_checkout
 def test_manifest_contains_all_required_files(tmp_path) -> None:
     """Manifest contains all files from TEMPLATE_FILES and TEST_FILES."""
     root = get_repo_root()
@@ -219,6 +245,7 @@ def test_manifest_contains_all_required_files(tmp_path) -> None:
     assert manifest_paths == expected_paths, f"Missing or extra files. Diff: {manifest_paths ^ expected_paths}"
 
 
+@requires_git_checkout
 def test_exports_to_new_directory_not_overwriting(tmp_path) -> None:
     """Multiple exports create separate directories, don't overwrite."""
     root = get_repo_root()
@@ -236,6 +263,7 @@ def test_exports_to_new_directory_not_overwriting(tmp_path) -> None:
     assert export_path1.name != export_path2.name
 
 
+@requires_git_checkout
 def test_export_includes_infra_telegram_bot_api(tmp_path) -> None:
     """Export includes infra/telegram-bot-api files."""
     root = get_repo_root()
@@ -248,6 +276,7 @@ def test_export_includes_infra_telegram_bot_api(tmp_path) -> None:
     assert (export_path / "infra" / "telegram-bot-api" / ".env.example").exists()
 
 
+@requires_git_checkout
 def test_export_includes_docs(tmp_path) -> None:
     """Export includes all docs files."""
     root = get_repo_root()
@@ -261,6 +290,7 @@ def test_export_includes_docs(tmp_path) -> None:
     assert (export_path / "docs" / "GETTING-STARTED.md").exists()
 
 
+@requires_git_checkout
 def test_export_includes_profile_config(tmp_path) -> None:
     """Export includes bot profile example and code."""
     root = get_repo_root()
@@ -272,6 +302,7 @@ def test_export_includes_profile_config(tmp_path) -> None:
     assert (export_path / "bot_template" / "profile.py").exists()
 
 
+@requires_git_checkout
 def test_no_legacy_code_in_export(tmp_path) -> None:
     """Export does not include legacy core/, features/, prompts/ directories."""
     root = get_repo_root()

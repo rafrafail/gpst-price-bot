@@ -16,6 +16,7 @@ from bot_template.models import Button, Content, Media
 from bot_template.navigation import Navigator, View
 from bot_template.scheduling import (
     get_schedule_options,
+    parse_exact_schedule,
     parse_relative_schedule,
 )
 
@@ -72,21 +73,8 @@ def parse_buttons(text: str) -> list[list[Button]]:
 
 
 def parse_schedule(text: str, tz: str, now: datetime) -> str:
-    try:
-        local = datetime.strptime(text.strip(), "%d.%m.%Y %H:%M")
-    except ValueError:
-        raise ValueError("Нужна дата в формате ДД.ММ.ГГГГ ЧЧ:ММ.") from None
-    zone = ZoneInfo(tz)
-    first = local.replace(tzinfo=zone, fold=0)
-    second = local.replace(tzinfo=zone, fold=1)
-    if first.utcoffset() != second.utcoffset():
-        raise ValueError("Время попало на перевод часов. Выберите другое время.")
-    utc = first.astimezone(timezone.utc)
-    if utc.astimezone(zone).replace(tzinfo=None) != local:
-        raise ValueError("Такого местного времени нет. Выберите другое время.")
-    if utc <= now:
-        raise ValueError("Дата уже прошла. Укажите будущее время или выберите «Сейчас».")
-    return utc.isoformat()
+    """Deprecated alias kept for tests/back-compat; see scheduling.parse_exact_schedule."""
+    return parse_exact_schedule(text, tz, now)
 
 
 class Application:
@@ -130,7 +118,8 @@ class Application:
         profile = self.settings.profile
 
         if screen == "home":
-            text = f"{profile.title}\n\n{profile.welcome}"
+            # settings.title already resolves env BOT_TITLE > profile > default (plan A1)
+            text = f"{self.settings.title}\n\n{profile.welcome}"
             # Build menu from profile.order
             for item in profile.menu_order:
                 if item == "about":
@@ -190,29 +179,24 @@ class Application:
             text = f"{sec.label}\n\n{sec.text}"
             # No extra actions for static sections
         elif screen == "admin" and user_id in self.settings.admins:
-            # Admin overview
-            total_users = await self.store.count_users()
-            subscribed_users = await self.store.count_subscribed_users()
-            reachable_users = await self.store.count_reachable_users()
-            my_campaigns = await self.store.list_campaigns(user_id, statuses=None)
-            scheduled = [c for c in my_campaigns if c.status == "scheduled"]
-            running = [c for c in my_campaigns if c.status in ("running", "paused")]
-            attention = [c for c in my_campaigns if c.status == "attention"]
+            # Admin overview: one consistent read transaction (plan D1)
+            ov = await self.store.admin_overview(user_id)
             text = (f"🔧 Администрирование\n\n"
                     f"👥 Пользователи:\n"
-                    f"  Всего: {total_users}\n"
-                    f"  Подписаны: {subscribed_users}\n"
-                    f"  Доступны: {reachable_users}\n\n"
+                    f"  Всего: {ov['total_users']}\n"
+                    f"  Подписаны: {ov['subscribed_users']}\n"
+                    f"  Доступны: {ov['reachable_users']}\n\n"
                     f"📣 Ваши рассылки:\n"
-                    f"  Запланировано: {len(scheduled)}\n"
-                    f"  В работе/на паузе: {len(running)}\n"
-                    f"  Нуждаются в внимании: {len(attention)}")
+                    f"  Запланировано: {ov['scheduled']}\n"
+                    f"  В работе: {ov['running']}\n"
+                    f"  На паузе: {ov['paused']}\n"
+                    f"  Нуждаются в внимании: {ov['attention']}")
             rows = []
-            if scheduled:
+            if ov["scheduled"]:
                 rows.append([("📋 Запланированные", "open:list:scheduled:0")])
-            if running:
+            if ov["running"] or ov["paused"]:
                 rows.append([("⚙️ В работе", "open:list:active:0")])
-            if attention:
+            if ov["attention"]:
                 rows.append([("⚠️ Нуждаются в внимании", "open:list:attention:0")])
             rows.append([("📊 История", "open:list:history:0")])
         elif screen == "broadcasts":
@@ -239,7 +223,10 @@ class Application:
                 page = min(page, pages - 1)
                 text += f"\n\nСтраница {page + 1} из {pages}"
                 for post in posts[page * 5:page * 5 + 5]:
-                    title = post.content.text.replace("\n", " ")[:30] or "Пост без текста"
+                    if post.label:
+                        title = post.label
+                    else:
+                        title = post.content.text.replace("\n", " ")[:30] or "Пост без текста"
                     rows.append([(f"#{post.id} · {title}", f"open:campaign:{post.id}")])
                 pager = []
                 if page:

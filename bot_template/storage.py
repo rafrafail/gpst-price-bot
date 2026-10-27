@@ -670,6 +670,33 @@ class Store:
     async def count_reachable_users(self) -> int:
         return await self._run(lambda connection: connection.execute("SELECT COUNT(*) FROM users WHERE reachable = 1").fetchone()[0])
 
+    async def admin_overview(self, owner_id: int) -> dict:
+        """One consistent read transaction for the whole admin overview (plan D1)."""
+        _positive(owner_id, "owner_id")
+
+        def overview(connection: sqlite3.Connection) -> dict:
+            totals = connection.execute(
+                "SELECT COUNT(*), COALESCE(SUM(subscribed = 1), 0), COALESCE(SUM(reachable = 1), 0) FROM users"
+            ).fetchone()
+            status_rows = connection.execute(
+                "SELECT status, COUNT(*) FROM campaigns WHERE owner_id = ? GROUP BY status",
+                (owner_id,),
+            ).fetchall()
+            by_status = {row[0]: row[1] for row in status_rows}
+            return {
+                "total_users": totals[0],
+                "subscribed_users": totals[1],
+                "reachable_users": totals[2],
+                "scheduled": by_status.get("scheduled", 0),
+                "running": by_status.get("running", 0),
+                "paused": by_status.get("paused", 0),
+                "attention": by_status.get("attention", 0),
+                "history": sum(by_status.get(s, 0) for s in
+                               ("completed", "partial", "failed", "stopped")),
+            }
+
+        return await self._run(overview)
+
     async def claim_album(self, user_id: int, group_id: str) -> bool:
         """Durable tombstone: a late/replayed group may never bind to a new input."""
         _positive(user_id, "user_id")

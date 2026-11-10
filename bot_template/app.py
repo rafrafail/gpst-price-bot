@@ -1,7 +1,9 @@
 """Telegram UI: one panel, persistent drafts, and one broadcast workflow."""
 import asyncio
 import logging
+import os
 import re
+from pathlib import Path
 from dataclasses import replace
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -19,6 +21,8 @@ from bot_template.scheduling import (
     parse_exact_schedule,
     parse_relative_schedule,
 )
+from features.prices.service import PriceService
+from bot_template.prices import format_price_item, money
 
 log = logging.getLogger(__name__)
 BACK = [("← Назад", "nav:back"), ("🏠 Главное меню", "nav:home")]
@@ -81,6 +85,8 @@ class Application:
     def __init__(self, bot: Bot, store, settings: Settings):
         self.bot, self.store, self.settings = bot, store, settings
         self.nav = Navigator(bot, store)
+        self.prices = PriceService(Path(os.getenv("PRICE_DATABASE_PATH", "data/prices.sqlite3")))
+        self.prices.initialize()
         self.locks: dict[int, asyncio.Lock] = {}
         self.albums: dict[tuple[int, str], dict] = {}
         self.tasks: set[asyncio.Task] = set()
@@ -118,34 +124,71 @@ class Application:
         profile = self.settings.profile
 
         if screen == "home":
-            # settings.title already resolves env BOT_TITLE > profile > default (plan A1)
-            text = f"{self.settings.title}\n\n{profile.welcome}"
-            # Build menu from profile.order
-            for item in profile.menu_order:
-                if item == "about":
-                    # Find the 'about' section
-                    sec = next((s for s in profile.sections if s.id == "about"), None)
-                    if sec:
-                        rows.append([(sec.label, f"open:{sec.id}")])
-                elif item == "preferences":
-                    rows.append([("⚙️ Уведомления", "open:preferences")])
-                elif item == "help":
-                    rows.append([("❔ Помощь", "open:help")])
-                elif item == "broadcasts" and self.settings.broadcasts and user_id in self.settings.admins:
-                    rows.append([("📣 Рассылки", "open:broadcasts")])
-                elif item == "admin" and user_id in self.settings.admins:
-                    rows.append([("🔧 Администрирование", "open:admin")])
-                elif item == "example" and profile.example.enabled:
-                    rows.append([("🧩 Пример раздела", "open:example")])
-                # Custom sections from profile
-                elif item not in {"about", "preferences", "help", "broadcasts", "example"}:
-                    sec = next((s for s in profile.sections if s.id == item), None)
-                    if sec:
-                        rows.append([(sec.label, f"open:{sec.id}")])
-            # Support URL if configured
-            if profile.support_url:
-                rows.append([("💬 Поддержка", profile.support_url)])
-
+            text = ("🏗️ Мониторинг цен ГПСТ\n\n"
+                    "Каталог поставщиков, рыночные предложения и отклонения цен.")
+            rows = [[("📊 Сводка", "prices:summary")],
+                    [("📋 Каталог цен поставщиков", "prices:catalog")],
+                    [("💰 Цены рынка", "prices:market")],
+                    [("🔄 Обновить рыночные цены", "prices:update")],
+                    [("❓ Помощь", "prices:help")]]
+        elif screen == "prices:summary":
+            stats = self.prices.summary()
+            text = ("📊 Сводка по ценам\n\n"
+                    f"Позиций в каталоге: {stats['catalog_count']}\n"
+                    f"Предложений поставщиков: {stats['supplier_offers_count']}\n"
+                    f"Позиций с отклонением > 5%: {stats['items_with_deviation']}\n"
+                    f"Среднее отклонение: {stats['avg_deviation_pct']}%")
+        elif screen == "prices:catalog":
+            ui = await self.store.get_ui(user_id)
+            query = ui.get("price_query", "")
+            offset = ui.get("price_offset", 0)
+            entries = self.prices.catalog_search(query, limit=8, offset=offset) if query else []
+            text = f"📋 Каталог поставщиков · запрос: {query or 'не задан'}\n"
+            if not entries:
+                text += "\nНет результатов. Нажмите «Новый поиск» и введите часть названия."
+            else:
+                text += "\nВыберите позицию:"
+                for entry in entries:
+                    rows.append([(entry['name'][:60], f"prices:item:{entry['id']}")])
+                pager = []
+                if offset >= 8:
+                    pager.append(("‹ Предыдущие", f"prices:page:{offset-8}"))
+                if len(entries) == 8:
+                    pager.append(("Следующие ›", f"prices:page:{offset+8}"))
+                if pager: rows.append(pager)
+            rows.append([("🔎 Новый поиск", "prices:catalog-search")])
+        elif screen.startswith("prices:item:"):
+            item_id = int(screen.rsplit(":", 1)[1])
+            item = self.prices.catalog_item(item_id)
+            text = format_price_item(item) if item else "Позиция каталога не найдена."
+            rows.append([("← К результатам", "prices:catalog")])
+        elif screen == "prices:market":
+            ui = await self.store.get_ui(user_id)
+            query, city, category, offset = ui.get("market_query", ""), ui.get("market_city", ""), ui.get("market_category", ""), ui.get("market_offset", 0)
+            entries = self.prices.market_search(query, city, category, 8, offset)
+            text = "💰 Цены рынка"
+            if not entries:
+                text += "\n\nПредложений по выбранным условиям нет."
+            else:
+                text += f"\nСтраница {offset//8+1}\n"
+                for entry in entries:
+                    source = entry.get("source_url") or "ссылка не указана"
+                    text += (f"\n• {entry['name']} — {money(entry['price'])} {entry['unit']}\n"
+                             f"  {entry['city']} · {entry['supplier']} · {entry['fetched_at']}\n  {source}\n")
+                nav = []
+                if offset: nav.append(("‹ Предыдущие", f"prices:market-page:{offset-8}"))
+                if len(entries) == 8: nav.append(("Следующие ›", f"prices:market-page:{offset+8}"))
+                if nav: rows.append(nav)
+            rows += [[("🔎 По названию", "prices:market-search")], [("🏙 Выбрать город", "prices:market-city")], [("📂 Выбрать категорию", "prices:market-category")]]
+        elif screen == "prices:help":
+            text = ("❓ Помощь\n\nСводка показывает состояние каталога и отклонения. "
+                    "В каталоге нажмите поиск и введите часть названия. В рыночных ценах "
+                    "можно фильтровать по названию, городу и категории.")
+        elif screen == "prices:update-confirm":
+            text = "Обновление может занять время. Запустить сбор рыночных цен?"
+            rows = [[("Подтвердить", "prices:update-run")]]
+        elif screen == "prices:update":
+            text = "Для автоматического сбора требуется настроить серверный сборщик источников."
         elif screen == "help":
             text = profile.help
         elif screen == "preferences":
@@ -394,7 +437,22 @@ class Application:
                     await self.render(uid, "Выберите действие в меню.")
                     return
                 text = message.text or ""
-                if entry["kind"] == "note":
+                if entry["kind"].startswith("price_"):
+                    kind = entry["kind"]
+                    value = text.strip()
+                    if not value:
+                        raise ValueError("Введите непустой запрос.")
+                    if kind == "price_catalog_search":
+                        ui.update(price_query=value, price_offset=0)
+                    elif kind == "price_market_search":
+                        ui.update(market_query=value, market_offset=0)
+                    elif kind == "price_market_city":
+                        ui.update(market_city=value, market_offset=0)
+                    elif kind == "price_market_category":
+                        ui.update(market_category=value, market_offset=0)
+                    ui["input"] = None
+                    await self.store.save_ui(uid, ui)
+                elif entry["kind"] == "note":
                     if not text.strip() or len(text) > 1500:
                         raise ValueError("Пришлите заметку текстом, от 1 до 1500 символов.")
                     ui.update(note=text, input=None)
@@ -490,7 +548,36 @@ class Application:
                 await self.render(uid, f"Не удалось выполнить действие: {str(exc)[:200]}")
 
     async def callback_action(self, uid: int, data: str) -> None:
-        if data == "nav:home":
+        if data == "prices:summary":
+            await self.nav.open(uid, "prices:summary")
+        elif data in {"prices:catalog", "prices:market", "prices:help", "prices:update-confirm"}:
+            await self.nav.open(uid, data)
+        elif data == "prices:update":
+            await self.nav.open(uid, "prices:update-confirm")
+        elif data == "prices:catalog-search":
+            await self.nav.open(uid, "prices:catalog")
+            await self.begin_input(uid, "price_catalog_search", "Введите часть названия позиции.")
+        elif data in {"prices:market-search", "prices:market-city", "prices:market-category"}:
+            field = data.rsplit(":", 1)[1]
+            kind = {"search": "price_market_search", "city": "price_market_city", "category": "price_market_category"}[field]
+            await self.begin_input(uid, kind, "Введите фильтр поиска." if field == "search" else "Введите город." if field == "city" else "Введите категорию.")
+        elif data.startswith("prices:page:"):
+            ui = await self.store.get_ui(uid)
+            ui["price_offset"] = max(0, int(data.rsplit(":", 1)[1]))
+            await self.store.save_ui(uid, ui)
+            await self.nav.open(uid, "prices:catalog", remember=False)
+        elif data.startswith("prices:market-page:"):
+            ui = await self.store.get_ui(uid)
+            ui["market_offset"] = max(0, int(data.rsplit(":", 1)[1]))
+            await self.store.save_ui(uid, ui)
+            await self.nav.open(uid, "prices:market", remember=False)
+        elif data.startswith("prices:item:"):
+            await self.nav.open(uid, f"prices:item:{int(data.rsplit(':', 1)[1])}")
+        elif data == "prices:update-run":
+            raise ValueError("Сборщик рыночных источников ещё не подключён; данные не менялись.")
+        elif data.startswith("prices:"):
+            raise ValueError("Неизвестное действие раздела цен.")
+        elif data == "nav:home":
             await self.nav.home(uid)
         elif data == "nav:back":
             await self.nav.back(uid)

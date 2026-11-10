@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import logging
+import os
 import re
 from contextlib import contextmanager
 from pathlib import Path
@@ -52,7 +53,8 @@ def process_lock(database: Path):
 
 
 def make_bot(settings: Settings) -> Bot:
-    session = AiohttpSession(api=TelegramAPIServer.from_base(settings.bot_api_base))
+    proxy = os.getenv("PROXY_URL")
+    session = AiohttpSession(api=TelegramAPIServer.from_base(settings.bot_api_base), proxy=proxy)
     return Bot(settings.token, session=session)
 
 

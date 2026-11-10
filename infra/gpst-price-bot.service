@@ -1,0 +1,15 @@
+[Unit]
+Description=GPST Price Bot (construction materials, @TT_material_bot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/user/projects/gpst_price_bot
+EnvironmentFile=/home/user/projects/gpst_price_bot/.env
+ExecStart=/home/user/projects/gpst_price_bot/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

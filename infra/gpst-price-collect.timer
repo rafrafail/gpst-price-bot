@@ -1,0 +1,11 @@
+[Unit]
+Description=GPST price collection nightly at 03:20 Asia/Yekaterinburg
+
+[Timer]
+# 03:20 Ekaterinburg == 22:20 UTC (previous day) — off-peak, before workday
+OnCalendar=*-*-* 22:20:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

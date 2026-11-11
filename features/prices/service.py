@@ -87,3 +87,22 @@ class PriceService:
             raise ValueError("invalid market filter")
         with self.connect() as db:
             return [row[0] for row in db.execute(f"SELECT DISTINCT {field} FROM market_prices WHERE {field}<>'' ORDER BY {field}")]
+
+    def last_collect_report(self) -> dict[str, Any] | None:
+        """Latest finished collect run with per-source stats (collector schema)."""
+        try:
+            with self.connect() as db:
+                row = db.execute(
+                    """SELECT status, stats_json FROM collect_runs
+                       WHERE status != 'running' ORDER BY id DESC LIMIT 1"""
+                ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        if not row:
+            return None
+        import json
+        try:
+            stats = json.loads(row["stats_json"])
+        except (ValueError, TypeError):
+            stats = {}
+        return {"status": row["status"], "stats": stats}

@@ -22,6 +22,7 @@ from bot_template.scheduling import (
     parse_relative_schedule,
 )
 from features.prices.service import PriceService
+from bot_template.price_ops import run_collect_and_report, send_price_export
 from bot_template.prices import format_price_item, money
 
 log = logging.getLogger(__name__)
@@ -87,6 +88,8 @@ class Application:
         self.nav = Navigator(bot, store)
         self.prices = PriceService(Path(os.getenv("PRICE_DATABASE_PATH", "data/prices.sqlite3")))
         self.prices.initialize()
+        self.collect_db_path = Path(os.getenv("PRICE_DATABASE_PATH", "data/prices.sqlite3"))
+        self._collect_lock = asyncio.Lock()
         self.locks: dict[int, asyncio.Lock] = {}
         self.albums: dict[tuple[int, str], dict] = {}
         self.tasks: set[asyncio.Task] = set()
@@ -130,6 +133,7 @@ class Application:
                     [("📋 Каталог цен поставщиков", "prices:catalog")],
                     [("💰 Цены рынка", "prices:market")],
                     [("🔄 Обновить рыночные цены", "prices:update")],
+                    [("📤 Выгрузка в Excel", "prices:export")],
                     [("❓ Помощь", "prices:help")]]
         elif screen == "prices:summary":
             stats = self.prices.summary()
@@ -185,10 +189,33 @@ class Application:
                     "В каталоге нажмите поиск и введите часть названия. В рыночных ценах "
                     "можно фильтровать по названию, городу и категории.")
         elif screen == "prices:update-confirm":
-            text = "Обновление может занять время. Запустить сбор рыночных цен?"
+            text = ("Обновление может занять 2–5 минут: бот обходит сайты поставщиков "
+                    "(Стройландия, УфаЦемент, ВсеИнструменты). Запустить сбор?")
             rows = [[("Подтвердить", "prices:update-run")]]
+        elif screen == "prices:export":
+            text = ("📤 Выгрузка в Excel\n\nВыберите формат файла:")
+            rows = [
+                [("📊 Текущие цены", "prices:export-current")],
+                [("📈 Изменения за 7 дней", "prices:export-changes")],
+            ]
+        elif screen.startswith("prices:export-done:"):
+            filename = screen.split(":", 2)[2]
+            text = f"Файл отправлен: {filename}"
+            rows = [[("📤 Ещё выгрузки", "prices:export")]]
         elif screen == "prices:update":
-            text = "Для автоматического сбора требуется настроить серверный сборщик источников."
+            last = self.prices.last_collect_report()
+            if not last:
+                text = "Сбор ещё не запускался. Нажмите «Обновить рыночные цены» в главном меню."
+            else:
+                status_names = {"ok": "успешно", "partial": "частично", "failed": "полный сбой"}
+                lines = [f"Последний сбор: {status_names.get(last['status'], last['status'])}"]
+                for key, stat in (last.get("stats") or {}).items():
+                    if stat.get("error"):
+                        lines.append(f"  {key}: не ответил ({stat['error'][:40]})")
+                    else:
+                        lines.append(f"  {key}: собрано {stat.get('fetched', 0)}")
+                text = "🔄 Статус сбора\n\n" + "\n".join(lines)
+            rows = [[("🔄 Запустить сбор", "prices:update-confirm")]]
         elif screen == "help":
             text = profile.help
         elif screen == "preferences":
@@ -550,7 +577,7 @@ class Application:
     async def callback_action(self, uid: int, data: str) -> None:
         if data == "prices:summary":
             await self.nav.open(uid, "prices:summary")
-        elif data in {"prices:catalog", "prices:market", "prices:help", "prices:update-confirm"}:
+        elif data in {"prices:catalog", "prices:market", "prices:help", "prices:update-confirm", "prices:export"}:
             await self.nav.open(uid, data)
         elif data == "prices:update":
             await self.nav.open(uid, "prices:update-confirm")
@@ -574,7 +601,11 @@ class Application:
         elif data.startswith("prices:item:"):
             await self.nav.open(uid, f"prices:item:{int(data.rsplit(':', 1)[1])}")
         elif data == "prices:update-run":
-            raise ValueError("Сборщик рыночных источников ещё не подключён; данные не менялись.")
+            await run_collect_and_report(self, uid)
+        elif data == "prices:export-current":
+            await send_price_export(self, uid, kind="current")
+        elif data == "prices:export-changes":
+            await send_price_export(self, uid, kind="changes")
         elif data.startswith("prices:"):
             raise ValueError("Неизвестное действие раздела цен.")
         elif data == "nav:home":

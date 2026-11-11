@@ -1,0 +1,12 @@
+[Unit]
+Description=GPST price bot nightly market collection
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=user
+WorkingDirectory=/home/user/projects/gpst_price_bot
+EnvironmentFile=/home/user/projects/gpst_price_bot/.env
+ExecStart=/home/user/projects/gpst_price_bot/.venv/bin/python -m features.prices.collector.collect --triggered-by=timer
+TimeoutStartSec=1800

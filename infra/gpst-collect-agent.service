@@ -1,0 +1,19 @@
+[Unit]
+Description=GPST price market collection (runs where sources are reachable)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=rafail
+WorkingDirectory=/home/rafail/trest_working_dir/price_bot
+Environment=PRICE_DATABASE_PATH=/home/rafail/trest_working_dir/price_bot/data/prices.sqlite3
+Environment=COLLECT_PROXY=http://user08:GEdhl9l55UlOgJmG@213.176.64.88:42567
+# keep shell proxies out of the browser subprocess env
+Environment=HTTP_PROXY=
+Environment=HTTPS_PROXY=
+ExecStart=/home/rafail/.hermes/hermes-agent/venv/bin/python -m features.prices.collector.collect --triggered-by=timer
+# push the collected DB to the prod bot host right after a run
+ExecStartPost=/usr/bin/rsync -az /home/rafail/trest_working_dir/price_bot/data/prices.sqlite3 tt-prod:/tmp/gpst_collected.sqlite3
+ExecStartPost=/usr/bin/ssh tt-prod /home/user/projects/gpst_price_bot/.venv/bin/python /home/user/projects/gpst_price_bot/scripts/absorb_collected.py
+TimeoutStartSec=1800

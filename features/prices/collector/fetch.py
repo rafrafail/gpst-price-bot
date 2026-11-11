@@ -5,7 +5,9 @@ content. Browser runs are batched in one Camoufox launch per collect run.
 """
 from __future__ import annotations
 
+import os
 import time
+import urllib.parse
 from dataclasses import dataclass
 
 import requests
@@ -37,16 +39,39 @@ def fetch_http(url: str, timeout: int = 25) -> FetchedPage:
 
 
 class BrowserPool:
-    """One Camoufox instance, reused across pages of a single run."""
+    """One Camoufox instance, reused across pages of a single run.
+
+    Proxy: sources are geo-sensitive (anti-bot per datacenter IP), so the
+    collector routes browser traffic through COLLECT_PROXY (set in .env on
+    servers where the local IP is blocked). Auth is passed split (server +
+    username/password) as camoufox/playwright requires.
+    """
 
     def __init__(self):
         self._ctx = None
         self._browser = None
 
+    @staticmethod
+    def _proxy_config() -> dict | None:
+        raw = os.getenv("COLLECT_PROXY", "").strip()
+        if not raw:
+            return None
+        parsed = urllib.parse.urlsplit(raw)
+        cfg: dict = {"server": f"{parsed.scheme or 'http'}://{parsed.hostname}:{parsed.port}"}
+        if parsed.username:
+            cfg["username"] = parsed.username
+        if parsed.password:
+            cfg["password"] = parsed.password
+        return cfg
+
     def __enter__(self):
         from camoufox.sync_api import Camoufox
 
-        self._ctx = Camoufox(headless=True, humanize=True)
+        proxy = self._proxy_config()
+        kwargs = {"headless": True, "humanize": True}
+        if proxy:
+            kwargs["proxy"] = proxy
+        self._ctx = Camoufox(**kwargs)
         self._browser = self._ctx.__enter__()
         return self
 

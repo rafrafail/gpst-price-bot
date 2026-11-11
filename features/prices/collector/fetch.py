@@ -69,6 +69,8 @@ class BrowserPool:
 
         proxy = self._proxy_config()
         kwargs = {"headless": True, "humanize": True}
+        if os.getenv("COLLECT_GEOIP", "1") != "0":
+            kwargs["geoip"] = True
         if proxy:
             kwargs["proxy"] = proxy
         self._ctx = Camoufox(**kwargs)

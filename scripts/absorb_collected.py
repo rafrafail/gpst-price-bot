@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
+import sys
+
+sys.path.insert(0, "/home/user/projects/gpst_price_bot")
+
 """Absorb a collected DB shipped to /tmp/gpst_collected.sqlite3 on prod:
 merge collector tables into the prod collector DB and re-sync bot market view.
 Safe to re-run; never deletes prod-collected rows.
 """
 import shutil
 import sqlite3
-import sys
 from pathlib import Path
 
 PROJ = Path("/home/user/projects/gpst_price_bot")
